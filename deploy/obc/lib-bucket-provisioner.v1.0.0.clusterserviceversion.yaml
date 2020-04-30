@@ -15,7 +15,7 @@ metadata:
     alm-examples: |-
       [
         {
-          "apiVersion": "objectbucket.io/v1alpha1",
+          "apiVersion": "objectbucket.io/v1alpha2",
           "kind": "ObjectBucketClaim",
           "metadata": {
             "name": "my-obc",
@@ -29,7 +29,7 @@ metadata:
           "status": {}
         },
         {
-          "apiVersion": "objectbucket.io/v1alpha1",
+          "apiVersion": "objectbucket.io/v1alpha2",
           "kind": "ObjectBucket",
           "metadata": {
             "name": "my-obc"
@@ -114,7 +114,7 @@ spec:
     owned:
       - name: objectbucketclaims.objectbucket.io
         kind: ObjectBucketClaim
-        version: v1alpha1
+        version: v1alpha2
         displayName: ObjectBucketClaim
         description: Claim a bucket just like claiming a PV.
           Automate you app bucket provisioning by creating OBC with your app deployment.
@@ -128,7 +128,7 @@ spec:
             version: v1
       - name: objectbuckets.objectbucket.io
         kind: ObjectBucket
-        version: v1alpha1
+        version: v1alpha2
         displayName: ObjectBucket
         description: Used under-the-hood. Created per ObjectBucketClaim and keeps provisioning information
         resources:

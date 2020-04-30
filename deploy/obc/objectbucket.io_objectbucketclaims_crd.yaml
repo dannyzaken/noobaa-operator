@@ -3,9 +3,12 @@ kind: CustomResourceDefinition
 metadata:
   name: objectbucketclaims.objectbucket.io
 spec:
-  version: v1alpha1
+  version: v1alpha2
   versions:
     - name: v1alpha1
+      served: true
+      storage: false
+    - name: v1alpha2
       served: true
       storage: true
   group: objectbucket.io
