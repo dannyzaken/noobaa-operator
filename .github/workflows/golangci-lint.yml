@@ -6,8 +6,8 @@ on:
     branches:
       - master
   pull_request:
-    branches: 
-      - master
+    branches:
+      - "master"
 jobs:
   golangci:
     name: golangci-lint
@@ -24,7 +24,6 @@ jobs:
           # working-directory: somedir
 
           # Optional: golangci-lint command line arguments.
-          # args: --issues-exit-code=0
-
+          args: --disable-all -E varcheck,structcheck,typecheck,errcheck,gosimple,unused,deadcode,ineffassign,staticcheck --timeout=4m
           # Optional: show only new issues if it's a pull request. The default value is `false`.
           # only-new-issues: true
