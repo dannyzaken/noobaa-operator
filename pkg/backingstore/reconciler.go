@@ -168,11 +168,15 @@ func (r *Reconciler) Reconcile() (reconcile.Result, error) {
 	oldStatefulSet := &appsv1.StatefulSet{}
 	oldStatefulSet.Name = fmt.Sprintf("%s-%s-noobaa", r.BackingStore.Name, options.SystemName)
 	oldStatefulSet.Namespace = r.Request.Namespace
+	var err error
 	if util.KubeCheck(oldStatefulSet) {
-		r.upgradeBackingStore(oldStatefulSet)
+		err = r.upgradeBackingStore(oldStatefulSet)
 	}
 
-	err := r.LoadBackingStoreSecret()
+	if err == nil {
+		err = r.LoadBackingStoreSecret()
+	}
+
 	if err == nil {
 		if r.BackingStore.DeletionTimestamp != nil {
 			err = r.ReconcileDeletion()
@@ -378,13 +382,19 @@ func (r *Reconciler) ReconcileDeletion() error {
 			"BackingStorePhaseDeleting",
 			"noobaa operator started deletion",
 		)
-		r.UpdateStatus()
+		err := r.UpdateStatus()
+		if err != nil {
+			return err
+		}
 	}
 
 	if r.NooBaa.UID == "" {
 		r.Logger.Infof("BackingStore %q remove finalizer because NooBaa system is already deleted", r.BackingStore.Name)
 		if r.BackingStore.Spec.Type == nbv1.StoreTypePVPool {
-			r.deletePvPool()
+			err := r.deletePvPool()
+			if err != nil {
+				return err
+			}
 		}
 		return r.FinalizeDeletion()
 	}
@@ -888,6 +898,12 @@ func (r *Reconciler) ReconcilePool() error {
 	if r.CreateHostsPoolParams != nil {
 		res, err := r.NBClient.CreateHostsPoolAPI(*r.CreateHostsPoolParams)
 		if err != nil {
+			if nbErr, ok := err.(*nb.RPCError); ok {
+				if nbErr.RPCCode == "BAD_REQUEST" {
+					msg := fmt.Sprintf("NooBaa BackingStore is in rejected phase due to %s", nbErr.Message)
+					return util.NewPersistentError("SmallVolumeSize", msg)
+				}
+			}
 			return err
 		}
 		if r.Secret.StringData["AGENT_CONFIG"] == "" {
@@ -943,11 +959,17 @@ func (r *Reconciler) reconcilePvPool() error {
 	util.KubeList(podsList, client.InNamespace(options.Namespace), client.MatchingLabels{"pool": r.BackingStore.Name})
 	util.KubeList(pvcsList, client.InNamespace(options.Namespace), client.MatchingLabels{"pool": r.BackingStore.Name})
 	if len(pvcsList.Items) < r.BackingStore.Spec.PVPool.NumVolumes {
-		r.reconcileMissingPvcs(pvcsList)
+		err := r.reconcileMissingPvcs(pvcsList)
+		if err != nil {
+			return err
+		}
 		util.KubeList(pvcsList, client.InNamespace(options.Namespace), client.MatchingLabels{"pool": r.BackingStore.Name})
 	}
 	if len(podsList.Items) < len(pvcsList.Items) {
-		r.reconcileMissingPods(podsList, pvcsList)
+		err := r.reconcileMissingPods(podsList, pvcsList)
+		if err != nil {
+			return err
+		}
 	}
 	return r.reconcileExistingPods(podsList)
 }
@@ -1040,7 +1062,7 @@ func (r *Reconciler) needUpdate(pod *corev1.Pod) bool {
 			r.Logger.Warnf("Change in Image Pull Secrets detected: SA(%v) Spec(%v)", sa.ImagePullSecrets, podSecrets)
 			return true
 		}
-	} else if podSecrets == nil || len(podSecrets) == 0 || !reflect.DeepEqual(noobaaSecret, podSecrets[0]) {
+	} else if len(podSecrets) == 0 || !reflect.DeepEqual(noobaaSecret, podSecrets[0]) {
 		r.Logger.Warnf("Change in Image Pull Secrets detected: NoobaaSecret(%v) Spec(%v)", noobaaSecret, podSecrets)
 		return true
 	}
