@@ -13,15 +13,14 @@ spec:
         app: noobaa
         noobaa-operator: deployment
     spec:
-      serviceAccountName: noobaa-operator
+      serviceAccountName: noobaa
       containers:
         - name: noobaa-operator
-          image: noobaa/noobaa-operator:0.1.0
-          imagePullPolicy: IfNotPresent
+          image: NOOBAA_OPERATOR_IMAGE
           resources:
             limits:
               cpu: "250m"
-              memory: "256Mi"
+              memory: "512Mi"
           env:
             - name: OPERATOR_NAME
               value: noobaa-operator

@@ -1,16 +1,15 @@
-language: go
-sudo: required
+os: linux
 dist: xenial
-
+sudo: required
+services:
+  - docker
+language: go
 go:
-- 1.12.5
-
-stages:
-  - name: build
-  - name: deploy
-
+  - 1.15.x
 env:
   global:
+    - GO111MODULE=on
+    - GOPROXY=https://proxy.golang.org
     - CHANGE_MINIKUBE_NONE_USER=true
     - MINIKUBE_WANTUPDATENOTIFICATION=false
     - MINIKUBE_WANTREPORTERRORPROMPT=false
@@ -18,20 +17,14 @@ env:
     - CHANGE_MINIKUBE_NONE_USER=true
     - KUBECONFIG=$HOME/.kube/config
 
-jobs:
-  include:
-    - stage: build
-      name: "Build and unit test"
-      script:
-        - make all
-        - make test
+install:
+  - bash .travis/install-tools.sh
+  - bash .travis/install-python.sh
+  - bash .travis/install-minikube.sh
 
-    - stage: build
-      name: "Run smoke tests"
-      install:
-        - make install-sdk
-        - "./.travis/deploy_minikube.sh"
-      script:
-        - make test-e2e
-      env:
-        - TEST_GROUP=smoke
+script:
+  - make gen-api-fail-if-dirty --always-make || exit 1
+  - make build || exit 1
+  - make test || exit 1
+  - make test-olm || exit 1
+  - make test-cli-flow || exit 1

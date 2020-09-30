@@ -1,97 +1,158 @@
-VERSION ?= 0.1.0
+# Required build-tools:
+#   - go
+#   - git
+#   - python3
+#   - minikube
+#   - operator-sdk
+
+export GO111MODULE=on
+export GOPROXY:=https://proxy.golang.org
+
+TIME ?= time -p
+
+VERSION ?= $(shell go run cmd/version/main.go)
 IMAGE ?= noobaa/noobaa-operator:$(VERSION)
 REPO ?= github.com/noobaa/noobaa-operator
+CATALOG_IMAGE ?= noobaa/noobaa-operator-catalog:$(VERSION)
 
-GO_FLAGS ?= CGO_ENABLED=0 GO111MODULE=on
-GO_LINUX_FLAGS ?= GOOS=linux GOARCH=amd64
+GO_LINUX ?= GOOS=linux GOARCH=amd64
+GOHOSTOS ?= $(shell go env GOHOSTOS)
 
-OUTPUT = build/_output
-BIN = $(OUTPUT)/bin
-BUNDLE = $(OUTPUT)/bundle
-VENV = $(OUTPUT)/venv
+OUTPUT ?= build/_output
+BIN ?= $(OUTPUT)/bin
+OLM ?= $(OUTPUT)/olm
+VENV ?= $(OUTPUT)/venv
 
-# Default tasks:
+export OPERATOR_SDK_VERSION ?= v0.17.2
+export OPERATOR_SDK ?= build/_tools/operator-sdk-$(OPERATOR_SDK_VERSION)
+
+KUBECONFIG ?= build/empty-kubeconfig
+
+#------------#
+#- Building -#
+#------------#
 
 all: build
-	@echo "@@@ All Done."
+	@echo "✅ all"
 .PHONY: all
 
-# Developer tasks:
-
-lint:
-	@echo Linting...
-	go get -u golang.org/x/lint/golint
-	golint -set_exit_status=1 $(shell go list ./cmd/... ./pkg/...)
-.PHONY: lint
-
-build: cli image
-	@echo "@@@ Build Done."
+build: cli image gen-olm
+	@echo "✅ build"
 .PHONY: build
 
-cli: vendor
-	${GO_FLAGS} go generate cmd/cli/cli.go
-	${GO_FLAGS} go build -mod=vendor -o $(BIN)/kubectl-noobaa $(REPO)/cmd/cli
+cli: $(OPERATOR_SDK) gen
+	$(OPERATOR_SDK) run --kubeconfig="$(KUBECONFIG)" --local --operator-flags "version"
+	@echo "✅ cli"
 .PHONY: cli
 
-dev: operator
-	WATCH_NAMESPACE=noobaa OPERATOR_NAME=noobaa-operator $(BIN)/noobaa-operator-local
-.PHONY: dev
-
-operator: vendor
-	go build -mod=vendor -o $(BIN)/noobaa-operator-local $(REPO)/cmd/manager
-.PHONY: operator
-
-gen: vendor
-	operator-sdk generate k8s
-	operator-sdk generate openapi
-.PHONY: gen
-
-vendor:
-	${GO_FLAGS} go mod vendor
-.PHONY: vendor
-
-image:
-	${GO_FLAGS} ${GO_LINUX_FLAGS} go build -mod=vendor -o $(BIN)/noobaa-operator $(REPO)/cmd/manager
-	docker build -f build/Dockerfile -t $(IMAGE) .
+image: $(OPERATOR_SDK) gen
+	$(OPERATOR_SDK) build $(IMAGE)
+	@echo "✅ image"
 .PHONY: image
 
-bundle:
-	mkdir -p $(BUNDLE)
-	cp deploy/olm-catalog/noobaa-operator/*.yaml $(BUNDLE)/
-	cp deploy/olm-catalog/noobaa-operator/$(VERSION)/*.yaml $(BUNDLE)/
-	cp deploy/crds/*crd.yaml $(BUNDLE)/
-	( python3 -m venv $(VENV) && . $(VENV)/bin/activate && pip install operator-courier >/dev/null )
-	( . $(VENV)/bin/activate && operator-courier verify --ui_validate_io $(BUNDLE) )
-.PHONY: bundle
+vendor:
+	go mod tidy
+	go mod vendor
+	@echo "✅ vendor"
+.PHONY: vendor
 
-push:
-	@echo TODO: To which tag do we want to push here?
-	@echo       version from version/version.go? master? git describe?
-	# docker push $(IMAGE)
-.PHONY: push
-
-test: vendor
-	go test ./cli/... ./pkg/...
-.PHONY: test
-
-test-e2e: vendor
-	operator-sdk test local ./test/e2e \
-		--global-manifest deploy/cluster_role_binding.yaml \
-		--debug \
-		--go-test-flags "-v -parallel=1"
-.PHONY: test
+run: $(OPERATOR_SDK) gen
+	$(OPERATOR_SDK) run --local --operator-flags "operator run"
+.PHONY: run
 
 clean:
-	rm $(BIN)/*
+	rm -rf $(OUTPUT)
 	rm -rf vendor/
+	@echo "✅ clean"
 .PHONY: clean
 
-# Deps
+release:
+	docker push $(IMAGE)
+	docker push $(CATALOG_IMAGE)
+	@echo "✅ docker push"
+	mkdir -p build-releases
+	cp build/_output/bin/noobaa-operator build-releases/noobaa-linux-v$(VERSION)
+	@echo "✅ build-releases/noobaa-linux-v$(VERSION)"
+	cp build/_output/bin/noobaa-operator-local build-releases/noobaa-mac-v$(VERSION)
+	@echo "✅ build-releases/noobaa-mac-v$(VERSION)"
+.PHONY: release
 
-install-sdk:
-	@echo Installing SDK ${SDK_VERSION}
-	curl https://github.com/operator-framework/operator-sdk/releases/download/${SDK_VERSION}/operator-sdk-${SDK_VERSION}-x86_64-linux-gnu -sLo ${GOPATH}/bin/operator-sdk
-	chmod +x ${GOPATH}/bin/operator-sdk
-.PHONY: install-sdk
+$(OPERATOR_SDK):
+	bash build/install-operator-sdk.sh
+	@echo "✅ $(OPERATOR_SDK)"
 
-#TODO scorecard 
+
+#------------#
+#- Generate -#
+#------------#
+
+gen: vendor pkg/bundle/deploy.go
+	@echo "✅ gen"
+.PHONY: gen
+
+pkg/bundle/deploy.go: pkg/bundler/bundler.go version/version.go $(shell find deploy/ -type f)
+	mkdir -p pkg/bundle
+	go run pkg/bundler/bundler.go deploy/ pkg/bundle/deploy.go
+
+gen-api: $(OPERATOR_SDK) gen
+	$(TIME) $(OPERATOR_SDK) generate k8s
+	$(TIME) $(OPERATOR_SDK) generate crds
+	@echo "✅ gen-api"
+.PHONY: gen-api
+
+gen-api-fail-if-dirty: gen-api
+	git diff --exit-code || ( \
+		echo "Build failed: gen-api is not up to date."; \
+		echo "Run 'make gen-api' and update your PR.";  \
+		exit 1; \
+	)
+.PHONY: gen-api-fail-if-dirty
+
+gen-olm: $(OPERATOR_SDK) gen
+	rm -rf $(OLM)
+	$(OPERATOR_SDK) run --kubeconfig="$(KUBECONFIG)" --local --operator-flags "olm catalog -n my-noobaa-operator --dir $(OLM)"
+	python3 -m venv $(VENV) && \
+		. $(VENV)/bin/activate && \
+		pip3 install --upgrade pip && \
+		pip3 install operator-courier==2.1.7 && \
+		operator-courier --verbose verify --ui_validate_io $(OLM)
+	docker build -t $(CATALOG_IMAGE) -f build/catalog-source.Dockerfile .
+	@echo "✅ gen-olm"
+.PHONY: gen-olm
+
+
+#-----------#
+#- Testing -#
+#-----------#
+
+test: lint test-go
+	@echo "✅ test"
+.PHONY: test
+
+lint: gen
+	GO111MODULE=off go get -u -a golang.org/x/lint/golint
+	GO111MODULE=off go run golang.org/x/lint/golint \
+		-set_exit_status=1 \
+		$$(go list ./... | cut -d'/' -f5- | sed 's/^\(.*\)$$/\.\/\1\//' | grep -v ./pkg/apis/noobaa/v1alpha1/ | grep -v ./pkg/bundle/)
+	@echo
+	GO111MODULE=off go run golang.org/x/lint/golint \
+		-set_exit_status=1 \
+		$$(echo ./pkg/apis/noobaa/v1alpha1/* | tr ' ' '\n' | grep -v '/zz_generated')
+	@echo "✅ lint"
+.PHONY: lint
+
+test-go: gen cli
+	$(TIME) go test ./pkg/... ./cmd/... ./version/...
+	@echo "✅ test-go"
+.PHONY: test-go
+
+test-cli-flow:
+	$(TIME) ./test/cli/test_cli_flow.sh
+	@echo "✅ test-cli-flow"
+.PHONY: test-cli-flow
+
+# test-olm runs tests for the OLM package
+test-olm: $(OPERATOR_SDK) gen-olm
+	$(TIME) ./test/test-olm.sh $(CATALOG_IMAGE)
+	@echo "✅ test-olm"
+.PHONY: test-olm

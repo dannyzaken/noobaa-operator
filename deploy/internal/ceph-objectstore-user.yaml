@@ -1,0 +1,6 @@
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: CEPH_OBJ_USER_NAME
+spec:
+  displayName: my display name
