@@ -257,7 +257,7 @@ func (r *Reconciler) LoadBackingStoreSecret() error {
 		if r.Secret.Name == "" {
 			if r.BackingStore.Spec.Type != nbv1.StoreTypePVPool {
 				return util.NewPersistentError("EmptySecretName",
-					fmt.Sprint("BackingStore Secret reference has an empty name"))
+					"BackingStore Secret reference has an empty name")
 			}
 			r.Secret.Name = fmt.Sprintf("backing-store-%s-%s", nbv1.StoreTypePVPool, r.BackingStore.Name)
 			r.Secret.Namespace = r.BackingStore.Namespace
@@ -554,9 +554,10 @@ func (r *Reconciler) ReadSystemInfo() error {
 			if err != nil {
 				return err
 			}
+
 			if len(hostsInfo.Hosts) > pvPool.NumVolumes { // scaling down - not supported
-				return util.NewPersistentError("InvalidBackingStore", fmt.Sprint(
-					"Scaling down the number of nodes is not currently supported"))
+				return util.NewPersistentError("InvalidBackingStore",
+					"Scaling down the number of nodes is not currently supported")
 			}
 			if pvPool.NumVolumes != int(pool.Hosts.ConfiguredCount) {
 				r.UpdateHostsPoolParams = &nb.UpdateHostsPoolParams{ // update core
@@ -668,7 +669,7 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 		if s3Compatible.Endpoint == "" {
 			u := url.URL{
 				Scheme: "https",
-				Host:   fmt.Sprint("127.0.0.1:6443"),
+				Host:   "127.0.0.1:6443",
 			}
 			// if s3Compatible.SSLDisabled {
 			// 	u.Scheme = "http"
@@ -718,7 +719,7 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 		if IBMCos.Endpoint == "" {
 			u := url.URL{
 				Scheme: "https",
-				Host:   fmt.Sprintf("127.0.0.1:6443"),
+				Host:   "127.0.0.1:6443",
 			}
 			// if IBMCos.SSLDisabled {
 			// 	u.Scheme = "http"
@@ -1153,8 +1154,7 @@ func (r *Reconciler) upgradeBackingStore(sts *appsv1.StatefulSet) error {
 	r.Logger.Infof("Deleting old statefulset: %s", sts.Name)
 	envVar := util.GetEnvVariable(&sts.Spec.Template.Spec.Containers[0].Env, "AGENT_CONFIG")
 	if envVar == nil {
-		return util.NewPersistentError("NoAgentConfig",
-			fmt.Sprintf("Old BackingStore stateful set not having agent config"))
+		return util.NewPersistentError("NoAgentConfig", "Old BackingStore stateful set not having agent config")
 	}
 	agentConfig := envVar.Value
 	replicas := sts.Spec.Replicas
