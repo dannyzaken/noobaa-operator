@@ -257,7 +257,7 @@ func (r *Reconciler) LoadBackingStoreSecret() error {
 		if r.Secret.Name == "" {
 			if r.BackingStore.Spec.Type != nbv1.StoreTypePVPool {
 				return util.NewPersistentError("EmptySecretName",
-					fmt.Sprintf("BackingStore Secret reference has an empty name"))
+					fmt.Sprint("BackingStore Secret reference has an empty name"))
 			}
 			r.Secret.Name = fmt.Sprintf("backing-store-%s-%s", nbv1.StoreTypePVPool, r.BackingStore.Name)
 			r.Secret.Namespace = r.BackingStore.Namespace
@@ -555,7 +555,7 @@ func (r *Reconciler) ReadSystemInfo() error {
 				return err
 			}
 			if len(hostsInfo.Hosts) > pvPool.NumVolumes { // scaling down - not supported
-				return util.NewPersistentError("InvalidBackingStore", fmt.Sprintf(
+				return util.NewPersistentError("InvalidBackingStore", fmt.Sprint(
 					"Scaling down the number of nodes is not currently supported"))
 			}
 			if pvPool.NumVolumes != int(pool.Hosts.ConfiguredCount) {
@@ -668,7 +668,7 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 		if s3Compatible.Endpoint == "" {
 			u := url.URL{
 				Scheme: "https",
-				Host:   fmt.Sprintf("127.0.0.1:6443"),
+				Host:   fmt.Sprint("127.0.0.1:6443"),
 			}
 			// if s3Compatible.SSLDisabled {
 			// 	u.Scheme = "http"
