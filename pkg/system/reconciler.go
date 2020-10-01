@@ -314,6 +314,7 @@ func (r *Reconciler) Reconcile() (reconcile.Result, error) {
 	r.UpdateStatus()
 	// if updateStatus will fail to update the CR for any reason we will continue to requeue the reconcile
 	// until the spec status will reflect the actual status of the bucketclass
+	// test
 	return res, nil
 }
 
