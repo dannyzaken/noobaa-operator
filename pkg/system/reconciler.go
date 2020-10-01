@@ -311,13 +311,9 @@ func (r *Reconciler) Reconcile() (reconcile.Result, error) {
 		log.Infof("✅ Done")
 	}
 
-	err = r.UpdateStatus()
+	r.UpdateStatus()
 	// if updateStatus will fail to update the CR for any reason we will continue to requeue the reconcile
 	// until the spec status will reflect the actual status of the bucketclass
-	if err != nil {
-		res.RequeueAfter = 3 * time.Second
-		log.Warnf("⏳ Temporary Error: %s", err)
-	}
 	return res, nil
 }
 
