@@ -987,8 +987,13 @@ func (r *Reconciler) UpgradeMigrateDB() error {
 
 // SetDesiredJobUpgradeDB updates the UpgradeJob as desired for reconciling
 func (r *Reconciler) SetDesiredJobUpgradeDB() error {
+	backoffLimit := int32(4)
 	r.UpgradeJob.Spec.Template.Spec.Containers[0].Image = r.NooBaa.Status.ActualImage
 	r.UpgradeJob.Spec.Template.Spec.Containers[0].Command = []string{"/noobaa_init_files/noobaa_init.sh", "db_migrate"}
+	// setting the restart policy to never to keep the pods around after failed migrations
+	// also reducing the backoff limit to avoid to many pods staying around in case of an issue
+	r.UpgradeJob.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+	r.UpgradeJob.Spec.BackoffLimit = &backoffLimit
 	r.setDesiredCoreEnv(&r.UpgradeJob.Spec.Template.Spec.Containers[0])
 	return nil
 }
