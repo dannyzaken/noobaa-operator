@@ -743,7 +743,7 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 
 	case nbv1.StoreTypeAzureBlob:
 		conn.EndpointType = nb.EndpointTypeAzure
-		conn.Endpoint = "https://blob.core.windows.net"
+		conn.Endpoint = "https://blob.core.usgovcloudapi.net"
 		conn.Identity = r.Secret.StringData["AccountName"]
 		conn.Secret = r.Secret.StringData["AccountKey"]
 

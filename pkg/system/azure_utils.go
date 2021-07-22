@@ -15,7 +15,11 @@ import (
 
 func (r *Reconciler) getStorageAccountsClient() storage.AccountsClient {
 	storageAccountsClient := storage.NewAccountsClient(r.AzureContainerCreds.StringData["azure_subscription_id"])
-	auth, _ := r.GetResourceManagementAuthorizer()
+	auth, err := r.GetResourceManagementAuthorizer()
+	if err != nil {
+		r.Logger.Errorf("DZDZ got error in r.GetResourceManagementAuthorizer(). %v", err)
+		return storageAccountsClient
+	}
 	storageAccountsClient.Authorizer = auth
 	storageAccountsClient.AddToUserAgent("Go-http-client/1.1")
 	return storageAccountsClient
@@ -147,7 +151,10 @@ func (r *Reconciler) DeleteContainer(accountName, accountGroupName, containerNam
 
 // Environment returns an `azure.Environment{...}` for the current cloud.
 func (r *Reconciler) Environment() *azure.Environment {
-	env, _ := azure.EnvironmentFromName("AzurePublicCloud")
+	env, err := azure.EnvironmentFromName("AZUREUSGOVERNMENTCLOUD")
+	if err != nil {
+		r.Logger.Errorf("got error on azure.EnvironmentFromName(). %v", err)
+	}
 	return &env
 }
 

@@ -568,7 +568,7 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 		r.Logger.Infof("Secret %q was not created yet by cloud-credentials operator. retry on next reconcile..", r.AzureCloudCreds.Spec.SecretRef.Name)
 		return fmt.Errorf("cloud credentials secret %q is not ready yet", r.AzureCloudCreds.Spec.SecretRef.Name)
 	}
-	r.Logger.Infof("Secret %s was created successfully by cloud-credentials operator", r.AzureCloudCreds.Spec.SecretRef.Name)
+	r.Logger.Infof("DZDZ - Secret %s was created successfully by cloud-credentials operator. region = %s", r.AzureCloudCreds.Spec.SecretRef.Name, cloudCredsSecret.StringData["azure_region"])
 
 	util.KubeCheck(r.AzureContainerCreds)
 	if r.AzureContainerCreds.UID == "" {
