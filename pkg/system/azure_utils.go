@@ -11,16 +11,18 @@ import (
 	"github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/noobaa/noobaa-operator/v2/pkg/util"
 )
 
 func (r *Reconciler) getStorageAccountsClient() storage.AccountsClient {
-	storageAccountsClient := storage.NewAccountsClient(r.AzureContainerCreds.StringData["azure_subscription_id"])
-	auth, _ := r.GetResourceManagementAuthorizer()
-	storageAccountsClient.Authorizer = auth
-	err := storageAccountsClient.AddToUserAgent("Go-http-client/1.1")
+	storageAccountsClient := storage.NewAccountsClientWithBaseURI("https://management.core.usgovcloudapi.net", r.AzureContainerCreds.StringData["azure_subscription_id"])
+	auth, err := r.GetResourceManagementAuthorizer()
 	if err != nil {
-		log.Fatalf("got error on storageAccountsClient.AddToUserAgent %v", err)
+		r.Logger.Errorf("DZDZ got error in r.GetResourceManagementAuthorizer(). %v", err)
+		return storageAccountsClient
 	}
+	storageAccountsClient.Authorizer = auth
+	storageAccountsClient.AddToUserAgent("Go-http-client/1.1")
 	return storageAccountsClient
 }
 
@@ -45,13 +47,14 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 			Type: to.StringPtr("Microsoft.Storage/storageAccounts"),
 		})
 	if err != nil {
-		return s, fmt.Errorf("storage account check-name-availability failed: %+v", err)
-	}
-
-	if !*result.NameAvailable {
-		return s, fmt.Errorf(
-			"storage account name [%s] not available: %v\nserver message: %v",
-			accountName, err, *result.Message)
+		r.Logger.Errorf("DZDZ storage account check-name-availability failed: %+v", err)
+		// return s, fmt.Errorf("storage account check-name-availability failed: %+v", err)
+	} else {
+		if !*result.NameAvailable {
+			return s, fmt.Errorf(
+				"storage account name [%s] not available: %v\nserver message: %v",
+				accountName, err, *result.Message)
+		}
 	}
 
 	future, err := storageAccountsClient.Create(
@@ -67,11 +70,13 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 		})
 
 	if err != nil {
+		util.Logger().Infof("DZDZ: failed to start creating storage account: %+v", err)
 		return s, fmt.Errorf("failed to start creating storage account: %+v", err)
 	}
 
 	err = future.WaitForCompletionRef(r.Ctx, storageAccountsClient.Client)
 	if err != nil {
+		util.Logger().Infof("DZDZ: failed to finish creating storage account: %+v", err)
 		return s, fmt.Errorf("failed to finish creating storage account: %+v", err)
 	}
 
@@ -115,7 +120,7 @@ func (r *Reconciler) getContainerURL(accountName, accountGroupName, containerNam
 	p := azblob.NewPipeline(c, azblob.PipelineOptions{
 		Telemetry: azblob.TelemetryOptions{Value: "Go-http-client/1.1"},
 	})
-	u, _ := url.Parse(fmt.Sprintf(`https://%s.blob.core.windows.net`, accountName))
+	u, _ := url.Parse(fmt.Sprintf(`https://%s.blob.core.usgovcloudapi.net`, accountName))
 	service := azblob.NewServiceURL(*u, p)
 	container := service.NewContainerURL(containerName)
 	return container
@@ -150,7 +155,10 @@ func (r *Reconciler) DeleteContainer(accountName, accountGroupName, containerNam
 
 // Environment returns an `azure.Environment{...}` for the current cloud.
 func (r *Reconciler) Environment() *azure.Environment {
-	env, _ := azure.EnvironmentFromName("AzurePublicCloud")
+	env, err := azure.EnvironmentFromName("AZUREUSGOVERNMENTCLOUD")
+	if err != nil {
+		r.Logger.Errorf("got error on azure.EnvironmentFromName(). %v", err)
+	}
 	return &env
 }
 

@@ -583,7 +583,7 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 		r.Logger.Infof("Secret %q was not created yet by cloud-credentials operator. retry on next reconcile..", r.AzureCloudCreds.Spec.SecretRef.Name)
 		return fmt.Errorf("cloud credentials secret %q is not ready yet", r.AzureCloudCreds.Spec.SecretRef.Name)
 	}
-	r.Logger.Infof("Secret %s was created successfully by cloud-credentials operator", r.AzureCloudCreds.Spec.SecretRef.Name)
+	r.Logger.Infof("DZDZ - Secret %s was created successfully by cloud-credentials operator. region = %s", r.AzureCloudCreds.Spec.SecretRef.Name, cloudCredsSecret.StringData["azure_region"])
 
 	util.KubeCheck(r.AzureContainerCreds)
 	if r.AzureContainerCreds.UID == "" {
@@ -1113,12 +1113,12 @@ func (r *Reconciler) UpdateBucketClassesPhase(Buckets []nb.BucketInfo) {
 }
 
 // DeleteOldServiceMonitor updates the service monitor by removing old format
-// This function should only be valid after upgrade from 5.6 to 5.7, 
-// it is here in 4.8 to avoid a situation where upgrading to 5.8 from a cluster that didn't 
-// went through this code in 5.7 (upgraded to a 5.7 patch version that does not include this code)  
+// This function should only be valid after upgrade from 5.6 to 5.7,
+// it is here in 4.8 to avoid a situation where upgrading to 5.8 from a cluster that didn't
+// went through this code in 5.7 (upgraded to a 5.7 patch version that does not include this code)
 func (r *Reconciler) DeleteOldServiceMonitor() error {
 
-	OldMonitor := &monitoringv1.ServiceMonitor {
+	OldMonitor := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "noobaa-service-monitor",
 			Namespace: options.Namespace,
