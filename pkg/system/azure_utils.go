@@ -1,8 +1,10 @@
 package system
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2017-06-01/storage"
@@ -12,6 +14,50 @@ import (
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
 )
+
+type AccountPropertiesCreateParametersHack struct {
+	storage.AccountPropertiesCreateParameters
+	MinTLSVersion *string `json:"minimumTlsVersion,omitempty"`
+}
+
+// AccountCreateParameters the parameters used when creating a storage account.
+type AccountCreateParametersHack struct {
+	// Sku - Required. Gets or sets the sku name.
+	Sku *storage.Sku `json:"sku,omitempty"`
+	// Kind - Required. Indicates the type of storage account. Possible values include: 'Storage', 'BlobStorage'
+	Kind storage.Kind `json:"kind,omitempty"`
+	// Location - Required. Gets or sets the location of the resource. This will be one of the supported and registered Azure Geo Regions (e.g. West US, East US, Southeast Asia, etc.). The geo region of a resource cannot be changed once it is created, but if an identical geo region is specified on update, the request will succeed.
+	Location *string `json:"location,omitempty"`
+	// Tags - Gets or sets a list of key value pairs that describe the resource. These tags can be used for viewing and grouping this resource (across resource groups). A maximum of 15 tags can be provided for a resource. Each tag must have a key with a length no greater than 128 characters and a value with a length no greater than 256 characters.
+	Tags map[string]*string `json:"tags"`
+	// Identity - The identity of the resource.
+	Identity *storage.Identity `json:"identity,omitempty"`
+	// AccountPropertiesCreateParameters - The parameters used to create the storage account.
+	*AccountPropertiesCreateParametersHack `json:"properties,omitempty"`
+}
+
+// CreatePreparer prepares the Create request.
+func CreatePreparerHack(client storage.AccountsClient, ctx context.Context, resourceGroupName string, accountName string, parameters AccountCreateParametersHack) (*http.Request, error) {
+	pathParameters := map[string]interface{}{
+		"accountName":       autorest.Encode("path", accountName),
+		"resourceGroupName": autorest.Encode("path", resourceGroupName),
+		"subscriptionId":    autorest.Encode("path", client.SubscriptionID),
+	}
+
+	const APIVersion = "2017-06-01"
+	queryParameters := map[string]interface{}{
+		"api-version": APIVersion,
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsPut(),
+		autorest.WithBaseURL(client.BaseURI),
+		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Storage/storageAccounts/{accountName}", pathParameters),
+		autorest.WithJSON(parameters),
+		autorest.WithQueryParameters(queryParameters))
+	return preparer.Prepare((&http.Request{}).WithContext(ctx))
+}
 
 func (r *Reconciler) getStorageAccountsClient() storage.AccountsClient {
 	storageAccountsClient := storage.NewAccountsClient(r.AzureContainerCreds.StringData["azure_subscription_id"])
@@ -55,16 +101,21 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 	}
 
 	enableHTTPSTrafficOnly := true
-	future, err := storageAccountsClient.Create(
+	minTLSVersion := "TLS1_2"
+	properties := &AccountPropertiesCreateParametersHack{}
+	properties.EnableHTTPSTrafficOnly = &enableHTTPSTrafficOnly
+	properties.MinTLSVersion = &minTLSVersion
+	future, err := createStorageAccountHack(
+		storageAccountsClient,
 		r.Ctx,
 		accountGroupName,
 		accountName,
-		storage.AccountCreateParameters{
+		AccountCreateParametersHack{
 			Sku: &storage.Sku{
 				Name: storage.StandardLRS},
-			Kind:                              storage.Storage,
-			Location:                          to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
-			AccountPropertiesCreateParameters: &storage.AccountPropertiesCreateParameters{EnableHTTPSTrafficOnly: &enableHTTPSTrafficOnly},
+			Kind:                                  storage.Storage,
+			Location:                              to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
+			AccountPropertiesCreateParametersHack: properties,
 		})
 
 	if err != nil {
@@ -77,6 +128,22 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 	}
 
 	return future.Result(storageAccountsClient)
+}
+
+func createStorageAccountHack(client storage.AccountsClient, ctx context.Context, resourceGroupName string, accountName string, parameters AccountCreateParametersHack) (result storage.AccountsCreateFuture, err error) {
+	req, err := CreatePreparerHack(client, ctx, resourceGroupName, accountName, parameters)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "storage.AccountsClient", "Create", nil, "Failure preparing request")
+		return
+	}
+
+	result, err = client.CreateSender(req)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "storage.AccountsClient", "Create", result.Response(), "Failure sending request")
+		return
+	}
+
+	return
 }
 
 // GetStorageAccount gets details on the specified storage account
