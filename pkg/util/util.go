@@ -56,16 +56,16 @@ import (
 )
 
 const (
-	oAuthWellKnownEndpoint = "https://openshift.default.svc/.well-known/oauth-authorization-server"
-	rootSecretPath         = "NOOBAA_ROOT_SECRET_PATH"
-	ibmRegion              = "ibm-cloud.kubernetes.io/region"
-	vaultCaCert            = "VAULT_CACERT"
-	vaultClientCert        = "VAULT_CLIENT_CERT"
-	vaultClientKey         = "VAULT_CLIENT_KEY"
-	vaultAddr              = "VAULT_ADDR"
-	vaultCaPath            = "VAULT_CAPATH"
-	vaultBackendPath       = "VAULT_BACKEND_PATH"
-	kmsProvider            = "KMS_PROVIDER"
+	oAuthWellKnownEndpoint  = "https://openshift.default.svc/.well-known/oauth-authorization-server"
+	rootSecretPath          = "NOOBAA_ROOT_SECRET_PATH"
+	ibmRegion               = "ibm-cloud.kubernetes.io/region"
+	vaultCaCert             = "VAULT_CACERT"
+	vaultClientCert         = "VAULT_CLIENT_CERT"
+	vaultClientKey          = "VAULT_CLIENT_KEY"
+	vaultAddr               = "VAULT_ADDR"
+	vaultCaPath             = "VAULT_CAPATH"
+	vaultBackendPath        = "VAULT_BACKEND_PATH"
+	kmsProvider             = "KMS_PROVIDER"
 	defaultVaultBackendPath = "secret/"
 )
 
@@ -871,13 +871,24 @@ func IsAWSPlatform() bool {
 	return isAWS
 }
 
-// IsAzurePlatform returns true if this cluster is running on Azure
-func IsAzurePlatform() bool {
+// IsAzurePlatformNonGovernment returns true if this cluster is running on Azure and also not on azure government cloud
+func IsAzurePlatformNonGovernment() bool {
 	nodesList := &corev1.NodeList{}
 	if ok := KubeList(nodesList); !ok || len(nodesList.Items) == 0 {
 		Panic(fmt.Errorf("failed to list kubernetes nodes"))
 	}
-	isAzure := strings.HasPrefix(nodesList.Items[0].Spec.ProviderID, "azure")
+	node := nodesList.Items[0]
+	isAzure := strings.HasPrefix(node.Spec.ProviderID, "azure")
+	if isAzure {
+		nodeLabels := node.GetLabels()
+		region := nodeLabels["topology.kubernetes.io/region"]
+		Logger().Infof("DZDZ: topology.kubernetes.io/region = %v", region)
+		if strings.HasPrefix(region, "usgov") || strings.HasPrefix(region, "usdod") {
+			Logger().Infof("DZDZ: found azure gov/dod region")
+			return false
+		}
+	}
+	Logger().Infof("DZDZ: returning isAzure = %v", isAzure)
 	return isAzure
 }
 
