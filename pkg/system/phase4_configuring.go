@@ -814,7 +814,7 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 
 	if r.AzureContainerCreds.StringData["AccountName"] == "" {
 		var azureAccountName = strings.ToLower(randname.GenerateWithPrefix("noobaaaccount", 5))
-		_, err := r.CreateStorageAccount(azureAccountName, azureGroupName)
+		err := r.CreateStorageAccount(azureAccountName, azureGroupName)
 		if err != nil {
 			return err
 		}

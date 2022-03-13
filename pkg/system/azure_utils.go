@@ -2,7 +2,9 @@ package system
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"net/url"
 
 	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2017-06-01/storage"
@@ -11,7 +13,30 @@ import (
 	"github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 )
+
+// AccountCreateParameters the parameters used when creating a storage account.
+type CreateStorageAccountParams struct {
+	// Sku - Required. Gets or sets the sku name.
+	Sku *storage.Sku `json:"sku,omitempty"`
+	// Kind - Required. Indicates the type of storage account. Possible values include: 'Storage', 'BlobStorage'
+	Kind storage.Kind `json:"kind,omitempty"`
+	// Location - Required. Gets or sets the location of the resource. This will be one of the supported and registered Azure Geo Regions (e.g. West US, East US, Southeast Asia, etc.). The geo region of a resource cannot be changed once it is created, but if an identical geo region is specified on update, the request will succeed.
+	Location *string `json:"location,omitempty"`
+	// Tags - Gets or sets a list of key value pairs that describe the resource. These tags can be used for viewing and grouping this resource (across resource groups). A maximum of 15 tags can be provided for a resource. Each tag must have a key with a length no greater than 128 characters and a value with a length no greater than 256 characters.
+	Tags map[string]*string `json:"tags"`
+	// Identity - The identity of the resource.
+	Identity *storage.Identity `json:"identity,omitempty"`
+	// AccountPropertiesCreateParameters - The parameters used to create the storage account.
+	*CreateStorageAccountProperties `json:"properties,omitempty"`
+}
+
+type CreateStorageAccountProperties struct {
+	// EnableHTTPSTrafficOnly - Allows https traffic only to storage service if sets to true.
+	EnableHTTPSTrafficOnly *bool   `json:"supportsHttpsTrafficOnly,omitempty"`
+	MinTLSVersion          *string `json:"minimumTlsVersion,omitempty"`
+}
 
 func (r *Reconciler) getStorageAccountsClient() storage.AccountsClient {
 	storageAccountsClient := storage.NewAccountsClient(r.AzureContainerCreds.StringData["azure_subscription_id"])
@@ -34,8 +59,8 @@ func (r *Reconciler) getAccountPrimaryKey(accountName, accountGroupName string) 
 
 // CreateStorageAccount starts creation of a new storage account and waits for
 // the account to be created.
-func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) (storage.Account, error) {
-	var s storage.Account
+func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) error {
+
 	storageAccountsClient := r.getStorageAccountsClient()
 
 	result, err := storageAccountsClient.CheckNameAvailability(
@@ -45,38 +70,101 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 			Type: to.StringPtr("Microsoft.Storage/storageAccounts"),
 		})
 	if err != nil {
-		return s, fmt.Errorf("storage account check-name-availability failed: %+v", err)
+		return fmt.Errorf("storage account check-name-availability failed: %+v", err)
 	}
 
 	if !*result.NameAvailable {
-		return s, fmt.Errorf(
+		return fmt.Errorf(
 			"storage account name [%s] not available: %v\nserver message: %v",
 			accountName, err, *result.Message)
 	}
 
 	enableHTTPSTrafficOnly := true
-	future, err := storageAccountsClient.Create(
-		r.Ctx,
-		accountGroupName,
-		accountName,
-		storage.AccountCreateParameters{
-			Sku: &storage.Sku{
-				Name: storage.StandardLRS},
-			Kind:                              storage.Storage,
-			Location:                          to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
-			AccountPropertiesCreateParameters: &storage.AccountPropertiesCreateParameters{EnableHTTPSTrafficOnly: &enableHTTPSTrafficOnly},
-		})
+	minTLSVersion := "TLS1_2"
 
-	if err != nil {
-		return s, fmt.Errorf("failed to start creating storage account: %+v", err)
+	parameters := CreateStorageAccountParams{
+		Sku: &storage.Sku{
+			Name: storage.StandardLRS},
+		Kind:     storage.Storage,
+		Location: to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
+		CreateStorageAccountProperties: &CreateStorageAccountProperties{
+			EnableHTTPSTrafficOnly: &enableHTTPSTrafficOnly,
+			MinTLSVersion:          &minTLSVersion,
+		},
 	}
 
-	err = future.WaitForCompletionRef(r.Ctx, storageAccountsClient.Client)
-	if err != nil {
-		return s, fmt.Errorf("failed to finish creating storage account: %+v", err)
+	pathParameters := map[string]interface{}{
+		"accountName":       autorest.Encode("path", accountName),
+		"resourceGroupName": autorest.Encode("path", accountGroupName),
+		"subscriptionId":    autorest.Encode("path", storageAccountsClient.SubscriptionID),
 	}
 
-	return future.Result(storageAccountsClient)
+	const APIVersion = "2017-06-01"
+	queryParameters := map[string]interface{}{
+		"api-version": APIVersion,
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsPut(),
+		autorest.WithBaseURL(storageAccountsClient.BaseURI),
+		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Storage/storageAccounts/{accountName}", pathParameters),
+		autorest.WithJSON(parameters),
+		autorest.WithQueryParameters(queryParameters))
+	req, err := preparer.Prepare((&http.Request{}).WithContext(r.Ctx))
+	if err != nil {
+		util.Logger().Errorf("got error on prepare. %v", err)
+		return err
+	}
+
+	resp, err := storageAccountsClient.Client.Do(req)
+
+	if err != nil {
+		util.Logger().Errorf("got error on storageAccountsClient.Client.Do(req). %v", err)
+		return err
+	}
+
+	bodyStr := "empty body"
+	if resp.Body != nil {
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err == nil {
+			bodyStr = string(body)
+		}
+
+	}
+
+	if resp.StatusCode != 200 && resp.StatusCode != 202 {
+		util.Logger().Errorf("got unexpected return value from create storage account. status=%d  body= %v", resp.StatusCode, bodyStr)
+		return err
+	}
+
+	util.Logger().Infof("Storage Account %q was created successfully", accountName)
+
+	return nil
+
+	// future, err := storageAccountsClient.Create(
+	// 	r.Ctx,
+	// 	accountGroupName,
+	// 	accountName,
+	// 	storage.AccountCreateParameters{
+	// 		Sku: &storage.Sku{
+	// 			Name: storage.StandardLRS},
+	// 		Kind:                              storage.Storage,
+	// 		Location:                          to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
+	// 		AccountPropertiesCreateParameters: &storage.AccountPropertiesCreateParameters{EnableHTTPSTrafficOnly: &enableHTTPSTrafficOnly},
+	// 	})
+
+	// if err != nil {
+	// 	return s, fmt.Errorf("failed to start creating storage account: %+v", err)
+	// }
+
+	// err = future.WaitForCompletionRef(r.Ctx, storageAccountsClient.Client)
+	// if err != nil {
+	// 	return s, fmt.Errorf("failed to finish creating storage account: %+v", err)
+	// }
+
+	// return future.Result(storageAccountsClient)
 }
 
 // GetStorageAccount gets details on the specified storage account
