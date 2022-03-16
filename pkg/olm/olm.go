@@ -8,19 +8,22 @@ import (
 	"os"
 	"strings"
 
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/bundle"
-	"github.com/noobaa/noobaa-operator/v2/pkg/crd"
-	"github.com/noobaa/noobaa-operator/v2/pkg/operator"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
-	"github.com/noobaa/noobaa-operator/v2/version"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
+	"github.com/noobaa/noobaa-operator/v5/pkg/crd"
+	"github.com/noobaa/noobaa-operator/v5/pkg/operator"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/version"
 
-	"github.com/blang/semver"
-	operv1 "github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
+	"github.com/blang/semver/v4"
+	operv1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"github.com/spf13/cobra"
+	admissionv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/cli-runtime/pkg/printers"
 	sigyaml "sigs.k8s.io/yaml"
@@ -28,6 +31,12 @@ import (
 
 type unObj = map[string]interface{}
 type unArr = []interface{}
+
+type generateCSVParams struct {
+	IsForODF  bool
+	SkipRange string
+	Replaces  string
+}
 
 // Cmd returns a CLI command
 func Cmd() *cobra.Command {
@@ -53,8 +62,13 @@ func CmdCatalog() *cobra.Command {
 		Use:   "catalog",
 		Short: "Create OLM catalog dir",
 		Run:   RunCatalog,
+		Args:  cobra.NoArgs,
 	}
 	cmd.Flags().String("dir", "./build/_output/olm", "The output dir for the OLM package")
+	cmd.Flags().Bool("odf", false, "Build package according to ODF requirements")
+	cmd.Flags().String("csv-name", "", "File name for the CSV YAML")
+	cmd.Flags().String("skip-range", "", "set the olm.skipRange annotation in the CSV")
+	cmd.Flags().String("replaces", "", "set the replaces property in the CSV")
 	return cmd
 }
 
@@ -64,6 +78,7 @@ func CmdCSV() *cobra.Command {
 		Use:   "csv",
 		Short: "Print CSV yaml",
 		Run:   RunCSV,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -74,6 +89,7 @@ func CmdHubInstall() *cobra.Command {
 		Use:   "install",
 		Short: "Install noobaa-operator from operatorhub.io",
 		Run:   RunHubInstall,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -84,6 +100,7 @@ func CmdHubUninstall() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Uninstall noobaa-operator from operatorhub.io",
 		Run:   RunHubUninstall,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -94,6 +111,7 @@ func CmdHubStatus() *cobra.Command {
 		Use:   "status",
 		Short: "Status of noobaa-operator from operatorhub.io",
 		Run:   RunHubStatus,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -104,6 +122,7 @@ func CmdLocalInstall() *cobra.Command {
 		Use:   "local-install",
 		Short: "Install noobaa-operator from local OLM catalog",
 		Run:   RunLocalInstall,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -114,6 +133,7 @@ func CmdLocalUninstall() *cobra.Command {
 		Use:   "local-uninstall",
 		Short: "Uninstall noobaa-operator from local OLM catalog",
 		Run:   RunLocalUninstall,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -126,12 +146,28 @@ func RunCatalog(cmd *cobra.Command, args []string) {
 	if dir == "" {
 		log.Fatalf(`Missing required flag: --dir: %s`, cmd.UsageString())
 	}
+
 	if !strings.HasSuffix(dir, "/") {
 		dir += "/"
 	}
-	versionDir := dir + version.Version + "/"
 
 	opConf := operator.LoadOperatorConf(cmd)
+
+	var versionDir string
+
+	forODF, _ := cmd.Flags().GetBool("odf")
+	skipRange, _ := cmd.Flags().GetString("skip-range")
+	replaces, _ := cmd.Flags().GetString("replaces")
+	csvParams := &generateCSVParams{
+		IsForODF:  forODF,
+		SkipRange: skipRange,
+		Replaces:  replaces,
+	}
+	if forODF {
+		versionDir = dir
+	} else {
+		versionDir = dir + version.Version + "/"
+	}
 
 	pkgBytes, err := sigyaml.Marshal(unObj{
 		"packageName":    "noobaa-operator",
@@ -143,9 +179,18 @@ func RunCatalog(cmd *cobra.Command, args []string) {
 	})
 	util.Panic(err)
 
+	csvFileName, _ := cmd.Flags().GetString("csv-name")
+	if csvFileName == "" {
+		csvFileName = versionDir + "noobaa-operator.v" + version.Version + ".clusterserviceversion.yaml"
+	} else {
+		csvFileName = versionDir + csvFileName
+	}
+
 	util.Panic(os.MkdirAll(versionDir, 0755))
-	util.Panic(ioutil.WriteFile(dir+"noobaa-operator.package.yaml", pkgBytes, 0644))
-	util.Panic(util.WriteYamlFile(versionDir+"noobaa-operator.v"+version.Version+".clusterserviceversion.yaml", GenerateCSV(opConf)))
+	if !forODF {
+		util.Panic(ioutil.WriteFile(dir+"noobaa-operator.package.yaml", pkgBytes, 0644))
+	}
+	util.Panic(util.WriteYamlFile(csvFileName, GenerateCSV(opConf, csvParams)))
 	crd.ForEachCRD(func(c *crd.CRD) {
 		if c.Spec.Group == nbv1.SchemeGroupVersion.Group {
 			util.Panic(util.WriteYamlFile(versionDir+c.Name+".crd.yaml", c))
@@ -156,17 +201,19 @@ func RunCatalog(cmd *cobra.Command, args []string) {
 // RunCSV runs a CLI command
 func RunCSV(cmd *cobra.Command, args []string) {
 	opConf := operator.LoadOperatorConf(cmd)
-	csv := GenerateCSV(opConf)
+	csv := GenerateCSV(opConf, nil)
 	p := printers.YAMLPrinter{}
 	util.Panic(p.PrintObj(csv, os.Stdout))
 }
 
 // GenerateCSV creates the CSV
-func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
+func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.ClusterServiceVersion {
 	almExamples, err := json.Marshal([]runtime.Object{
 		util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaa_cr_yaml),
 		util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_backingstore_cr_yaml),
+		util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_namespacestore_cr_yaml),
 		util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_bucketclass_cr_yaml),
+		util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaaaccount_cr_yaml),
 	})
 	util.Panic(err)
 
@@ -175,6 +222,7 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 	csv.Name = "noobaa-operator.v" + version.Version
 	csv.Namespace = options.Namespace
 	csv.Annotations["containerImage"] = options.OperatorImage
+	// this annotation hides the operator in OCP console
 	// csv.Annotations["createdAt"] = ???
 	csv.Annotations["alm-examples"] = string(almExamples)
 	csv.Spec.Version.Version = semver.MustParse(version.Version)
@@ -192,20 +240,73 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 			ServiceAccountName: opConf.SA.Name,
 			Rules:              opConf.Role.Rules,
 		})
+	csv.Spec.InstallStrategy.StrategySpec.Permissions = append(csv.Spec.InstallStrategy.StrategySpec.Permissions,
+		operv1.StrategyDeploymentPermissions{
+			ServiceAccountName: opConf.SAEndpoint.Name,
+			Rules:              opConf.RoleEndpoint.Rules,
+		})
+	csv.Spec.InstallStrategy.StrategySpec.Permissions = append(csv.Spec.InstallStrategy.StrategySpec.Permissions,
+		operv1.StrategyDeploymentPermissions{
+			ServiceAccountName: opConf.SAUI.Name,
+			Rules:              opConf.RoleUI.Rules,
+		})
 	csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs = []operv1.StrategyDeploymentSpec{}
 	csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs = append(csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs,
 		operv1.StrategyDeploymentSpec{
 			Name: opConf.Deployment.Name,
 			Spec: opConf.Deployment.Spec,
 		})
+
+	if csvParams != nil {
+		if csvParams.IsForODF {
+			// add anotation to hide the operator in OCP console
+			csv.Annotations["operators.operatorframework.io/operator-type"] = "non-standalone"
+
+			// add env vars for noobaa-core and noobaa-db images
+			operatorContainer := &csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs[0].Spec.Template.Spec.Containers[0]
+			operatorContainer.Env = append(operatorContainer.Env,
+				corev1.EnvVar{
+					Name:  "NOOBAA_CORE_IMAGE",
+					Value: options.NooBaaImage,
+				},
+				corev1.EnvVar{
+					Name:  "NOOBAA_DB_IMAGE",
+					Value: options.DBImage,
+				},
+				corev1.EnvVar{
+					Name:  "ENABLE_NOOBAA_ADMISSION",
+					Value: "true",
+				})
+
+			csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs[0].Spec.Template.Spec.Tolerations = []corev1.Toleration{
+				{
+					Key:      "node.ocs.openshift.io/storage",
+					Effect:   corev1.TaintEffectNoSchedule,
+					Operator: corev1.TolerationOpEqual,
+					Value:    "true",
+				},
+			}
+		}
+
+		if csvParams.Replaces != "" {
+			csv.Spec.Replaces = csvParams.Replaces
+		}
+
+		if csvParams.SkipRange != "" {
+			csv.Annotations[operv1.SkipRangeAnnotationKey] = csvParams.SkipRange
+		}
+	}
+
 	csv.Spec.CustomResourceDefinitions.Owned = []operv1.CRDDescription{}
 	csv.Spec.CustomResourceDefinitions.Required = []operv1.CRDDescription{}
 	crdDescriptions := map[string]string{
 		"NooBaa": `A NooBaa system - Create this to start`,
 		"BackingStore": `Storage target spec such as aws-s3, s3-compatible, ibm-cos, PV's and more. ` +
 			`Used in BucketClass to construct data placement policies.`,
-		"BucketClass": `Storage policy spec  tiering, mirroring, spreading. ` +
-			`Combines BackingStores. Referenced by ObjectBucketClaims.`,
+		"NamespaceStore": `Storage target spec such as aws-s3, s3-compatible, ibm-cos and more. ` +
+			`Used in BucketClass to construct namespace policies.`,
+		"BucketClass": `Storage policy spec  tiering, mirroring, spreading, namespace policy. ` +
+			`Combines BackingStores Or NamespaceStores. Referenced by ObjectBucketClaims.`,
 		"ObjectBucketClaim": `Claim a bucket just like claiming a PV. ` +
 			`Automate you app bucket provisioning by creating OBC with your app deployment. ` +
 			`A secret and configmap (name=claim) will be created with access details for the app pods.`,
@@ -214,6 +315,7 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 	crdDisplayNames := map[string]string{
 		"NooBaa":            "NooBaa",
 		"BackingStore":      "Backing Store",
+		"NamespaceStore":    "Namespace Store",
 		"BucketClass":       "Bucket Class",
 		"ObjectBucketClaim": "Object Bucket Claim",
 		"ObjectBucket":      "Object Bucket",
@@ -235,6 +337,7 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 		uiFieldGroupS3Compatible       = uiFieldGroup + "s3Compatible"
 		uiFieldGroupIBMCos             = uiFieldGroup + "ibmCos"
 		uiFieldGroupPlacementPolicy    = uiFieldGroup + "placementPolicy"
+		uiFieldGroupNamespacePolicy    = uiFieldGroup + "namespacePolicy"
 	)
 
 	crdSpecDescriptors := map[string][]operv1.SpecDescriptor{
@@ -413,6 +516,93 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 			},
 		},
 
+		"NamespaceStore": []operv1.SpecDescriptor{
+			operv1.SpecDescriptor{
+				Description:  "Region is the AWS region.",
+				Path:         "awsS3.region",
+				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
+				DisplayName:  "Region",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
+				Path:         "awsS3.secret.name",
+				XDescriptors: []string{uiFieldGroupAwsS3, uiK8sSecret},
+				DisplayName:  "Secret",
+			},
+			operv1.SpecDescriptor{
+				Description:  "SSLDisabled allows to disable SSL and use plain http.",
+				Path:         "awsS3.sslDisabled",
+				XDescriptors: []string{uiFieldGroupAwsS3, uiBooleanSwitch},
+				DisplayName:  "SSL Disabled",
+			},
+			operv1.SpecDescriptor{
+				Description:  "TargetBucket is the name of the target S3 bucket.",
+				Path:         "awsS3.targetBucket",
+				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
+				DisplayName:  "Target Bucket",
+			},
+			operv1.SpecDescriptor{
+				Description:  " Secret refers to a secret that provides the credentials. The secret should define AccountName and AccountKey as provided\nby Azure Blob.",
+				Path:         "azureBlob.secret.name",
+				XDescriptors: []string{uiFieldGroupAzureBlob, uiK8sSecret},
+				DisplayName:  "Secret",
+			},
+			operv1.SpecDescriptor{
+				Description:  "TargetBlobContainer is the name of the target Azure Blob container.",
+				Path:         "azureBlob.targetBlobContainer",
+				XDescriptors: []string{uiFieldGroupAzureBlob, uiText},
+				DisplayName:  "Target Blob Container",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Endpoint is the S3 compatible endpoint: http(s)://host:port.",
+				Path:         "s3Compatible.endpoint",
+				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
+				DisplayName:  "End Point",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
+				Path:         "s3Compatible.secret.name",
+				XDescriptors: []string{uiFieldGroupS3Compatible, uiK8sSecret},
+				DisplayName:  "Secret",
+			},
+			operv1.SpecDescriptor{
+				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
+				Path:         "s3Compatible.signatureVersion",
+				XDescriptors: []string{uiFieldGroupS3Compatible, uiNumber},
+				DisplayName:  "Signature Version",
+			},
+			operv1.SpecDescriptor{
+				Description:  "TargetBucket is the name of the target S3 bucket.",
+				Path:         "s3Compatible.targetBucket",
+				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
+				DisplayName:  "Target Bucket",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Endpoint is the IBM COS endpoint: http(s)://host:port.",
+				Path:         "IBMCos.endpoint",
+				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
+				DisplayName:  "End Point",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Secret refers to a secret that provides the credentials. The secret should define IBM_COS_ACCESS_KEY_ID and IBM_COS_SECRET_ACCESS_KEY.",
+				Path:         "IBMCos.secret.name",
+				XDescriptors: []string{uiFieldGroupIBMCos, uiK8sSecret},
+				DisplayName:  "Secret",
+			},
+			operv1.SpecDescriptor{
+				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
+				Path:         "IBMCos.signatureVersion",
+				XDescriptors: []string{uiFieldGroupIBMCos, uiNumber},
+				DisplayName:  "Signature Version",
+			},
+			operv1.SpecDescriptor{
+				Description:  "TargetBucket is the name of the target IBM COS bucket.",
+				Path:         "IBMCos.targetBucket",
+				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
+				DisplayName:  "Target Bucket",
+			},
+		},
+
 		"BucketClass": []operv1.SpecDescriptor{
 			operv1.SpecDescriptor{
 				Description:  "BackingStores is an unordered list of backing store names. The meaning of the list depends on the placement.",
@@ -426,7 +616,38 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 				XDescriptors: []string{uiFieldGroupPlacementPolicy, uiText},
 				DisplayName:  "Placement",
 			},
+			operv1.SpecDescriptor{
+				Description:  "Namespace Policy type specifies the type of the namespace policy configuration.",
+				Path:         "namespacePolicy.type",
+				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
+				DisplayName:  "Namespace Policy",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Resource specifies the namespace store configured by the bucket class to be read and write targets.",
+				Path:         "namespacePolicy.single.resource",
+				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
+				DisplayName:  "Resource",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Read Resources specifies the namespace stores configured by the bucket class to be read targets.",
+				Path:         "namespacePolicy.Multi.readResources",
+				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
+				DisplayName:  "Read Resources",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Write Resource specifies the namespace store configured by the bucket class to be write target.",
+				Path:         "namespacePolicy.Multi.writeResource",
+				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
+				DisplayName:  "Write Resource",
+			},
+			operv1.SpecDescriptor{
+				Description:  "Hub Resource specifies the target namespace store configured by the bucket class to be read and write targets.",
+				Path:         "namespacePolicy.Cache.hubResource",
+				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
+				DisplayName:  "Hub Resource",
+			},
 		},
+
 		"ObjectBucketClaim": []operv1.SpecDescriptor{},
 		"ObjectBucket":      []operv1.SpecDescriptor{},
 	}
@@ -435,7 +656,7 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 		crdDesc := operv1.CRDDescription{
 			Name:            c.Name,
 			Kind:            c.Spec.Names.Kind,
-			Version:         c.Spec.Version,
+			Version:         c.Spec.Versions[0].Name,
 			DisplayName:     crdDisplayNames[c.Spec.Names.Kind],
 			Description:     crdDescriptions[c.Spec.Names.Kind],
 			SpecDescriptors: crdSpecDescriptors[c.Spec.Names.Kind],
@@ -453,6 +674,27 @@ func GenerateCSV(opConf *operator.Conf) *operv1.ClusterServiceVersion {
 		}
 	})
 
+	aw := util.KubeObject(bundle.File_deploy_internal_admission_webhook_yaml).(*admissionv1.ValidatingWebhookConfiguration)
+	vaw := aw.Webhooks[0]
+
+	webhookDefinition := operv1.WebhookDescription{
+		Type:                    operv1.ValidatingAdmissionWebhook,
+		AdmissionReviewVersions: vaw.AdmissionReviewVersions,
+		ContainerPort:           443,
+		TargetPort: &intstr.IntOrString{
+			Type:   intstr.Int,
+			IntVal: 8080,
+			StrVal: "8080",
+		},
+		DeploymentName: "noobaa-operator",
+		FailurePolicy:  vaw.FailurePolicy,
+		MatchPolicy:    vaw.MatchPolicy,
+		GenerateName:   vaw.Name,
+		Rules:          vaw.Rules,
+		SideEffects:    vaw.SideEffects,
+		WebhookPath:    vaw.ClientConfig.Service.Path,
+	}
+	csv.Spec.WebhookDefinitions = append(csv.Spec.WebhookDefinitions, webhookDefinition)
 	return csv
 }
 

@@ -23,7 +23,7 @@ fi
 
 function install_olm() {
     echo "----> Install OLM and Operator Marketplace ..."
-    ${OPERATOR_SDK} olm install --version 0.14.1 || true
+    ${OPERATOR_SDK} olm install --version 0.16.1 || true
     # kubectl apply -f https://github.com/operator-framework/operator-lifecycle-manager/releases/download/0.10.0/crds.yaml
     # kubectl apply -f https://github.com/operator-framework/operator-lifecycle-manager/releases/download/0.10.0/olm.yaml
     # kubectl apply -f https://github.com/operator-framework/operator-marketplace/raw/master/deploy/upstream/01_namespace.yaml
@@ -40,6 +40,7 @@ function create_catalog() {
     echo "----> Creating CatalogSource ..."
     # kubectl delete -n olm catalogsource operatorhubio-catalog
     yq write deploy/olm/catalog-source.yaml spec.image $CATALOG_IMAGE | kubectl apply -f -
+    # yq eval ".spec.image = \"$CATALOG_IMAGE"\" deploy/olm/catalog-source.yaml
 }
 
 function create_subscription() {
@@ -62,7 +63,8 @@ function wait_for_operator() {
     done
 
     echo "----> Wait for operator to be ready ..."
-    kubectl wait pod -l noobaa-operator=deployment --for condition=ready
+    # kubectl wait pod -l noobaa-operator=deployment --for condition=ready
+    kubectl rollout status deployment noobaa-operator
 }
 
 function test_operator() {

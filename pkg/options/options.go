@@ -1,9 +1,8 @@
 package options
 
 import (
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
-	"github.com/noobaa/noobaa-operator/v2/version"
-	"github.com/operator-framework/operator-sdk/pkg/k8sutil"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/version"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -15,6 +14,7 @@ func Cmd() *cobra.Command {
 		Use:   "options",
 		Short: "Print the list of global flags",
 		Run:   RunOptions,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -30,7 +30,7 @@ const (
 	// ContainerImageRepo is the repo of the default image url
 	ContainerImageRepo = "noobaa-core"
 	// ContainerImageTag is the tag of the default image url
-	ContainerImageTag = "5.6.0-20200909"
+	ContainerImageTag = "5.10.0-20220120"
 	// ContainerImageSemverLowerBound is the lower bound for supported image versions
 	ContainerImageSemverLowerBound = "5.0.0"
 	// ContainerImageSemverUpperBound is the upper bound for supported image versions
@@ -48,6 +48,9 @@ const (
 
 	// SystemName is a constant as we want just a single system per namespace
 	SystemName = "noobaa"
+
+	// ServiceServingCertCAFile points to OCP root CA to be added to the default root CA list
+	ServiceServingCertCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
 )
 
 // Namespace is the target namespace for locating the noobaa system
@@ -72,9 +75,13 @@ var DBImage = "centos/mongodb-36-centos7"
 // currently it can not be overridden.
 var DBPostgresImage = "centos/postgresql-12-centos7"
 
+// DBMongoImage is the default mongo db image url
+// this is used during migration to solve issues where mongo STS referencing to postgres image
+var DBMongoImage = "centos/mongodb-36-centos7"
+
 // DBType is the default db image type
 // it can be overridden for testing or different types.
-var DBType = "mongodb"
+var DBType = "postgres"
 
 // DBVolumeSizeGB can be used to override the default database volume size
 var DBVolumeSizeGB = 0
@@ -82,6 +89,13 @@ var DBVolumeSizeGB = 0
 // DBStorageClass is used for PVC's allocation for the noobaa server data
 // it can be overridden for testing or different PV providers.
 var DBStorageClass = ""
+
+// MongoDbURL is used for providing mongodb url
+// it can be overridden for testing or different url.
+var MongoDbURL = ""
+
+//DebugLevel can be used to override the default debug level
+var DebugLevel = "default_level"
 
 // PVPoolDefaultStorageClass is used for PVC's allocation for the noobaa server data
 // it can be overridden for testing or different PV providers.
@@ -95,6 +109,12 @@ var ImagePullSecret = ""
 // This info is used by the operator for environment based decisions (e.g. number of resources to request per
 // pod)
 var MiniEnv = false
+
+// DisableLoadBalancerService is used for setting the service type to ClusterIP instead of LoadBalancer
+var DisableLoadBalancerService = false
+
+// AdmissionWebhook is used for deploying the system with admission validation webhook
+var AdmissionWebhook = false
 
 // SubDomainNS returns a unique subdomain for the namespace
 func SubDomainNS() string {
@@ -110,7 +130,7 @@ func ObjectBucketProvisionerName() string {
 var FlagSet = pflag.NewFlagSet("noobaa", pflag.ContinueOnError)
 
 func init() {
-	ns, _ := k8sutil.GetWatchNamespace()
+	ns, _ := util.GetWatchNamespace()
 	if ns == "" {
 		ns = util.CurrentNamespace()
 	}
@@ -146,6 +166,14 @@ func init() {
 		DBStorageClass, "The database volume storage class name",
 	)
 	FlagSet.StringVar(
+		&MongoDbURL, "mongodb-url",
+		MongoDbURL, "url for mongodb",
+	)
+	FlagSet.StringVar(
+		&DebugLevel, "debug-level",
+		DebugLevel, "The type of debug sets that the system prints (all, nsfs, warn, default_level)",
+	)
+	FlagSet.StringVar(
 		&PVPoolDefaultStorageClass, "pv-pool-default-storage-class",
 		PVPoolDefaultStorageClass, "The default storage class name for BackingStores of type pv-pool",
 	)
@@ -156,5 +184,13 @@ func init() {
 	FlagSet.BoolVar(
 		&MiniEnv, "mini",
 		false, "Signal the operator that it is running in a low resource environment",
+	)
+	FlagSet.BoolVar(
+		&DisableLoadBalancerService, "disable-load-balancer",
+		false, "Set the service type to ClusterIP instead of LoadBalancer",
+	)
+	FlagSet.BoolVar(
+		&AdmissionWebhook, "admission",
+		false, "Install the system with admission validation webhook",
 	)
 }

@@ -6,8 +6,8 @@ import (
 	"path"
 	"strings"
 
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/nb"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/nb"
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -31,6 +31,7 @@ func (r *Reconciler) ReconcilePhaseConnecting() error {
 	}
 
 	r.CheckServiceStatus(r.ServiceS3, r.RouteS3, &r.NooBaa.Status.Services.ServiceS3, "s3-https")
+	r.CheckServiceStatus(r.ServiceSts, r.RouteSts, &r.NooBaa.Status.Services.ServiceSts, "sts-https")
 
 	return nil
 

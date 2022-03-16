@@ -2,10 +2,13 @@ package util
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,28 +17,36 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	monitoringv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	obv1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
-	nbapis "github.com/noobaa/noobaa-operator/v2/pkg/apis"
+	nbapis "github.com/noobaa/noobaa-operator/v5/pkg/apis"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
 	routev1 "github.com/openshift/api/route/v1"
+	secv1 "github.com/openshift/api/security/v1"
 	cloudcredsv1 "github.com/openshift/cloud-credential-operator/pkg/apis/cloudcredential/v1"
 	conditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
-	operv1 "github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
+	operv1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiextv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	storagev1 "k8s.io/api/storage/v1"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -52,6 +63,11 @@ import (
 
 const (
 	oAuthWellKnownEndpoint = "https://openshift.default.svc/.well-known/oauth-authorization-server"
+	ibmRegion              = "ibm-cloud.kubernetes.io/region"
+
+	gigabyte             = 1024 * 1024 * 1024
+	petabyte             = gigabyte * 1024 * 1024
+	obcMaxSizeUpperLimit = petabyte * 1023
 )
 
 // OAuth2Endpoints holds OAuth2 endpoints information.
@@ -60,21 +76,67 @@ type OAuth2Endpoints struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 }
 
+// ValidationError is a custom error if the validation failed
+type ValidationError struct {
+	Msg string
+}
+
+// IsValidationError check if err is of type ValidationError
+func IsValidationError(err error) bool {
+	_, ok := err.(ValidationError)
+	return ok
+}
+
+// Error returns the ValidationError message
+func (e ValidationError) Error() string {
+	return e.Msg
+}
+
 var (
 	ctx        = context.TODO()
 	log        = logrus.WithContext(ctx)
 	lazyConfig *rest.Config
-	lazyRest   *rest.RESTClient
 	lazyClient client.Client
 
 	// InsecureHTTPTransport is a global insecure http transport
 	InsecureHTTPTransport = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
+
+	// SecureHTTPTransport is a global secure http transport
+	SecureHTTPTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+	}
 )
 
+// AddToRootCAs adds a local cert file to Our SecureHttpTransport
+func AddToRootCAs(localCertFile string) error {
+	rootCAs, _ := x509.SystemCertPool()
+	if rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+
+	// Read in the cert file
+	certs, err := ioutil.ReadFile(localCertFile)
+	if err != nil {
+		log.Errorf("Failed to append %q to RootCAs: %v", localCertFile, err)
+		return err
+	}
+
+	// Append our cert to the system pool
+	if ok := rootCAs.AppendCertsFromPEM(certs); !ok {
+		log.Errorf("Failed to append %q to RootCAs", localCertFile)
+		return fmt.Errorf("Failed to append %q to RootCAs", localCertFile)
+	}
+
+	// Trust the augmented cert pool in our client
+	log.Infof("Successfuly appended %q to RootCAs", localCertFile)
+	SecureHTTPTransport.TLSClientConfig.RootCAs = rootCAs
+	return nil
+}
+
 func init() {
-	Panic(apiextv1beta1.AddToScheme(scheme.Scheme))
+	Panic(apiextv1.AddToScheme(scheme.Scheme))
 	Panic(nbapis.AddToScheme(scheme.Scheme))
 	Panic(obv1.AddToScheme(scheme.Scheme))
 	Panic(monitoringv1.AddToScheme(scheme.Scheme))
@@ -82,6 +144,7 @@ func init() {
 	Panic(operv1.AddToScheme(scheme.Scheme))
 	Panic(cephv1.AddToScheme(scheme.Scheme))
 	Panic(routev1.AddToScheme(scheme.Scheme))
+	Panic(secv1.AddToScheme(scheme.Scheme))
 	Panic(autoscalingv1.AddToScheme(scheme.Scheme))
 }
 
@@ -112,9 +175,11 @@ func MapperProvider(config *rest.Config) (meta.RESTMapper, error) {
 				g.Name == "operator.openshift.io" ||
 				g.Name == "route.openshift.io" ||
 				g.Name == "cloudcredential.openshift.io" ||
+				g.Name == "security.openshift.io" ||
 				g.Name == "monitoring.coreos.com" ||
 				g.Name == "ceph.rook.io" ||
 				g.Name == "autoscaling" ||
+				g.Name == "batch" ||
 				strings.HasSuffix(g.Name, ".k8s.io") {
 				return true
 			}
@@ -154,11 +219,11 @@ func KubeObject(text string) runtime.Object {
 
 // KubeApply will check if the object exists and will create/update accordingly
 // and report the object status.
-func KubeApply(obj runtime.Object) bool {
+func KubeApply(obj client.Object) bool {
 	klient := KubeClient()
 	objKey := ObjectKey(obj)
 	gvk := obj.GetObjectKind().GroupVersionKind()
-	clone := obj.DeepCopyObject()
+	clone := obj.DeepCopyObject().(client.Object)
 	err := klient.Get(ctx, objKey, clone)
 	if err == nil {
 		err = klient.Update(ctx, obj)
@@ -182,24 +247,93 @@ func KubeApply(obj runtime.Object) bool {
 		log.Printf("❌ Conflict: %s %q: %s\n", gvk.Kind, objKey.Name, err)
 		return false
 	}
+	statusErr, ok := err.(*errors.StatusError)
+	if ok {
+		log.Printf("❌ Status Error: %s %q: %s\n", gvk.Kind, objKey.Name, statusErr.ErrStatus.Message)
+		return false
+	}
 	Panic(err)
 	return false
 }
 
-// KubeCreateSkipExisting will check if the object exists and will create/skip accordingly
-// and report the object status.
-func KubeCreateSkipExisting(obj runtime.Object) bool {
+// kubeCreateSkipOrFailExisting create k8s object,
+// return true on success
+// if the object exists return skipOrFail parameter
+// return false on failure
+func kubeCreateSkipOrFailExisting(obj client.Object, skipOrFail bool) bool {
 	klient := KubeClient()
 	objKey := ObjectKey(obj)
 	gvk := obj.GetObjectKind().GroupVersionKind()
-	clone := obj.DeepCopyObject()
+	clone := obj.DeepCopyObject().(client.Object)
+	err := klient.Get(ctx, objKey, clone)
+	if err == nil {
+		log.Printf("✅ Already Exists: %s %q\n", gvk.Kind, objKey.Name)
+		return skipOrFail
+	}
+	if meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
+		log.Printf("❌ CRD Missing: %s %q\n", gvk.Kind, objKey.Name)
+		return false
+	}
+	if errors.IsNotFound(err) {
+		err = klient.Create(ctx, obj)
+		if err == nil {
+			log.Printf("✅ Created: %s %q\n", gvk.Kind, objKey.Name)
+			return true
+		}
+		if errors.IsNotFound(err) {
+			log.Printf("❌ Namespace Missing: %s %q: kubectl create ns %s\n",
+				gvk.Kind, objKey.Name, objKey.Namespace)
+			return false
+		}
+	}
+	if errors.IsConflict(err) {
+		log.Printf("❌ Conflict: %s %q: %s\n", gvk.Kind, objKey.Name, err)
+		return false
+	}
+	if errors.IsForbidden(err) {
+		log.Printf("❌ Forbidden: %s %q: %s\n", gvk.Kind, objKey.Name, err)
+		return false
+	}
+	if errors.IsInvalid(err) {
+		log.Printf("❌ Invalid: %s %q: %s\n", gvk.Kind, objKey.Name, err)
+		return false
+	}
+	statusErr, ok := err.(*errors.StatusError)
+	if ok {
+		log.Printf("❌ Status Error: %s %q: %s\n", gvk.Kind, objKey.Name, statusErr.ErrStatus.Message)
+		return false
+	}
+	Panic(err)
+	return false
+}
+
+// KubeCreateFailExisting will check if the object exists and will create/skip accordingly
+// and report the object status.
+func KubeCreateFailExisting(obj client.Object) bool {
+	return kubeCreateSkipOrFailExisting(obj, false)
+}
+
+// KubeCreateSkipExisting will try to create an object
+// returns true of the object exist or was created
+// returns false otherwise
+func KubeCreateSkipExisting(obj client.Object) bool {
+	return kubeCreateSkipOrFailExisting(obj, true)
+}
+
+// KubeCreateOptional will check if the object exists and will create/skip accordingly
+// It detects the situation of a missing CRD and reports it as an optional feature.
+func KubeCreateOptional(obj client.Object) bool {
+	klient := KubeClient()
+	objKey := ObjectKey(obj)
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	clone := obj.DeepCopyObject().(client.Object)
 	err := klient.Get(ctx, objKey, clone)
 	if err == nil {
 		log.Printf("✅ Already Exists: %s %q\n", gvk.Kind, objKey.Name)
 		return false
 	}
 	if meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
-		log.Printf("❌ CRD Missing: %s %q\n", gvk.Kind, objKey.Name)
+		log.Printf("⬛ (Optional) CRD Unavailable: %s %q\n", gvk.Kind, objKey.Name)
 		return false
 	}
 	if errors.IsNotFound(err) {
@@ -231,7 +365,7 @@ func KubeCreateSkipExisting(obj runtime.Object) bool {
 }
 
 // KubeDelete deletes an object and reports the object status.
-func KubeDelete(obj runtime.Object, opts ...client.DeleteOption) bool {
+func KubeDelete(obj client.Object, opts ...client.DeleteOption) bool {
 	klient := KubeClient()
 	objKey := ObjectKey(obj)
 	gvk := obj.GetObjectKind().GroupVersionKind()
@@ -247,6 +381,11 @@ func KubeDelete(obj runtime.Object, opts ...client.DeleteOption) bool {
 		log.Printf("🗑️  Conflict (OK): %s %q: %s\n", gvk.Kind, objKey.Name, err)
 	} else if errors.IsNotFound(err) {
 		return true
+	}
+	statusErr, ok := err.(*errors.StatusError)
+	if ok {
+		log.Printf("❌ Status Error: %s %q: %s\n", gvk.Kind, objKey.Name, statusErr.ErrStatus.Message)
+		return false
 	}
 
 	time.Sleep(10 * time.Millisecond)
@@ -281,8 +420,29 @@ func KubeDelete(obj runtime.Object, opts ...client.DeleteOption) bool {
 	return deleted
 }
 
+// KubeDeleteNoPolling deletes an object without waiting for acknowledgement the object got deleted
+func KubeDeleteNoPolling(obj client.Object, opts ...client.DeleteOption) bool {
+	klient := KubeClient()
+	objKey := ObjectKey(obj)
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	deleted := false
+
+	err := klient.Delete(ctx, obj, opts...)
+	if err == nil {
+		deleted = true
+		log.Printf("🗑️  Deleting: %s %q\n", gvk.Kind, objKey.Name)
+	} else if errors.IsConflict(err) {
+		log.Printf("🗑️  Conflict (OK): %s %q: %s\n", gvk.Kind, objKey.Name, err)
+	} else if errors.IsNotFound(err) {
+		return true
+	}
+
+	Panic(err)
+	return (deleted)
+}
+
 // KubeDeleteAllOf deletes an list of objects and reports the status.
-func KubeDeleteAllOf(obj runtime.Object, opts ...client.DeleteAllOfOption) bool {
+func KubeDeleteAllOf(obj client.Object, opts ...client.DeleteAllOfOption) bool {
 	klient := KubeClient()
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	deleted := false
@@ -299,7 +459,7 @@ func KubeDeleteAllOf(obj runtime.Object, opts ...client.DeleteAllOfOption) bool 
 }
 
 // KubeUpdate updates an object and reports the object status.
-func KubeUpdate(obj runtime.Object) bool {
+func KubeUpdate(obj client.Object) bool {
 	klient := KubeClient()
 	objKey := ObjectKey(obj)
 	gvk := obj.GetObjectKind().GroupVersionKind()
@@ -320,12 +480,17 @@ func KubeUpdate(obj runtime.Object) bool {
 		log.Printf("❌ Not Found: %s %q\n", gvk.Kind, objKey.Name)
 		return false
 	}
+	statusErr, ok := err.(*errors.StatusError)
+	if ok {
+		log.Printf("❌ Status Error: %s %q: %s\n", gvk.Kind, objKey.Name, statusErr.ErrStatus.Message)
+		return false
+	}
 	Panic(err)
 	return false
 }
 
 // KubeCheck checks if the object exists and reports the object status.
-func KubeCheck(obj runtime.Object) bool {
+func KubeCheck(obj client.Object) bool {
 	name, kind, err := KubeGet(obj)
 	if err == nil {
 		SecretResetStringDataFromData(obj)
@@ -350,7 +515,7 @@ func KubeCheck(obj runtime.Object) bool {
 
 // KubeCheckOptional checks if the object exists and reports the object status.
 // It detects the situation of a missing CRD and reports it as an optional feature.
-func KubeCheckOptional(obj runtime.Object) bool {
+func KubeCheckOptional(obj client.Object) bool {
 	name, kind, err := KubeGet(obj)
 	if err == nil {
 		log.Printf("✅ (Optional) Exists: %s %q\n", kind, name)
@@ -374,7 +539,7 @@ func KubeCheckOptional(obj runtime.Object) bool {
 
 // KubeCheckQuiet checks if the object exists fills the given object if found.
 // returns true if the object was found. It does not print any status
-func KubeCheckQuiet(obj runtime.Object) bool {
+func KubeCheckQuiet(obj client.Object) bool {
 	_, _, err := KubeGet(obj)
 	if err == nil {
 		return true
@@ -389,9 +554,9 @@ func KubeCheckQuiet(obj runtime.Object) bool {
 	return false
 }
 
-// KubeGet gets a runtime.Object, fills the given object and returns the name and kind
+// KubeGet gets a client.Object, fills the given object and returns the name and kind
 // returns error on failure
-func KubeGet(obj runtime.Object) (name string, kind string, err error) {
+func KubeGet(obj client.Object) (name string, kind string, err error) {
 	klient := KubeClient()
 	objKey := ObjectKey(obj)
 	name = objKey.Name
@@ -402,7 +567,7 @@ func KubeGet(obj runtime.Object) (name string, kind string, err error) {
 }
 
 // KubeList returns a list of objects.
-func KubeList(list runtime.Object, options ...client.ListOption) bool {
+func KubeList(list client.ObjectList, options ...client.ListOption) bool {
 	klient := KubeClient()
 	gvk := list.GetObjectKind().GroupVersionKind()
 	err := klient.List(ctx, list, options...)
@@ -481,14 +646,32 @@ func GetPodLogs(pod corev1.Pod) (map[string]io.ReadCloser, error) {
 
 	containerMap := make(map[string]io.ReadCloser)
 	for _, container := range allContainers {
-		podLogOpts := corev1.PodLogOptions{Container: container.Name}
-		req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
-		podLogs, err := req.Stream()
-		if err != nil {
-			log.Printf(`Could not read logs %s container %s, reason: %s\n`, pod.Name, container.Name, err)
-			continue
+		getPodLogOpts := func(pod *corev1.Pod, logOpts *corev1.PodLogOptions, nameSuffix *string) {
+			req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, logOpts)
+
+			podLogs, err := req.Stream(ctx)
+			if err != nil {
+				// do not warn about lack of additional previous logs, i.e. when nameSuffix is set
+				if nameSuffix == nil {
+					log.Printf(`Could not read logs %s container %s, reason: %s`, pod.Name, container.Name, err)
+				}
+				return
+			}
+			mapKey := container.Name
+			if nameSuffix != nil {
+				mapKey += "-" + *nameSuffix
+			}
+			containerMap[mapKey] = podLogs
 		}
-		containerMap[container.Name] = podLogs
+
+		// retrieve logs from a current instantiation of pod containers
+		podLogOpts := corev1.PodLogOptions{Container: container.Name}
+		getPodLogOpts(&pod, &podLogOpts, nil)
+
+		// retrieve logs from a previous instantiation of pod containers
+		prevPodLogOpts := corev1.PodLogOptions{Container: container.Name, Previous: true}
+		previousSuffix := "previous"
+		getPodLogOpts(&pod, &prevPodLogOpts, &previousSuffix)
 	}
 	return containerMap, nil
 }
@@ -571,8 +754,6 @@ func LogError(err error) {
 
 // IgnoreError do nothing if err is not nil
 func IgnoreError(err error) {
-	if err != nil {
-	}
 }
 
 // InitLogger initializes the logrus logger with defaults
@@ -662,9 +843,8 @@ func SecretResetStringDataFromData(obj runtime.Object) {
 }
 
 // ObjectKey returns the objects key (namespace + name)
-func ObjectKey(obj runtime.Object) client.ObjectKey {
-	objKey, err := client.ObjectKeyFromObject(obj)
-	Panic(err)
+func ObjectKey(obj client.Object) client.ObjectKey {
+	objKey := client.ObjectKeyFromObject(obj)
 	return objKey
 }
 
@@ -797,6 +977,22 @@ func IsAWSPlatform() bool {
 	return isAWS
 }
 
+// IsSTSClusterNB returns true if it is running on an STS cluster
+func IsSTSClusterNB(nb *nbv1.NooBaa) bool {
+	if nb.Spec.DefaultBackingStoreSpec != nil {
+		return nb.Spec.DefaultBackingStoreSpec.AWSS3.AWSSTSRoleARN != nil
+	}
+	return false
+}
+
+// IsSTSClusterBS returns true if it is running on an STS cluster
+func IsSTSClusterBS(bs *nbv1.BackingStore) bool {
+	if bs.Spec.Type == nbv1.StoreTypeAWSS3 {
+		return bs.Spec.AWSS3.AWSSTSRoleARN != nil
+	}
+	return false
+}
+
 // IsAzurePlatform returns true if this cluster is running on Azure
 func IsAzurePlatform() bool {
 	nodesList := &corev1.NodeList{}
@@ -805,6 +1001,43 @@ func IsAzurePlatform() bool {
 	}
 	isAzure := strings.HasPrefix(nodesList.Items[0].Spec.ProviderID, "azure")
 	return isAzure
+}
+
+// IsGCPPlatform returns true if this cluster is running on GCP
+func IsGCPPlatform() bool {
+	nodesList := &corev1.NodeList{}
+	if ok := KubeList(nodesList); !ok || len(nodesList.Items) == 0 {
+		Panic(fmt.Errorf("failed to list kubernetes nodes"))
+	}
+	isGCP := strings.HasPrefix(nodesList.Items[0].Spec.ProviderID, "gce")
+	return isGCP
+}
+
+// IsIBMPlatform returns true if this cluster is running on IBM Cloud
+func IsIBMPlatform() bool {
+	nodesList := &corev1.NodeList{}
+	if ok := KubeList(nodesList); !ok || len(nodesList.Items) == 0 {
+		Panic(fmt.Errorf("failed to list kubernetes nodes"))
+	}
+	isIBM := strings.HasPrefix(nodesList.Items[0].Spec.ProviderID, "ibm")
+	if isIBM {
+		// Incase of Satellite cluster is deplyed in user provided infrastructure
+		if strings.Contains(nodesList.Items[0].Spec.ProviderID, "/sat-") {
+			isIBM = false
+		}
+	}
+	return isIBM
+}
+
+// GetIBMRegion returns the cluster's region in IBM Cloud
+func GetIBMRegion() (string, error) {
+	nodesList := &corev1.NodeList{}
+	if ok := KubeList(nodesList); !ok || len(nodesList.Items) == 0 {
+		return "", fmt.Errorf("failed to list kubernetes nodes")
+	}
+	labels := nodesList.Items[0].GetLabels()
+	region := labels[ibmRegion]
+	return region, nil
 }
 
 // GetAWSRegion parses the region from a node's name
@@ -833,6 +1066,8 @@ func GetAWSRegion() (string, error) {
 		"ap-south-1":     "ap-south-1",
 		"me-south-1":     "me-south-1",
 		"sa-east-1":      "sa-east-1",
+		"us-gov-west-1":  "us-gov-west-1",
+		"us-gov-east-1":  "us-gov-east-1",
 	}
 	nodesList := &corev1.NodeList{}
 	if ok := KubeList(nodesList); !ok || len(nodesList.Items) == 0 {
@@ -856,7 +1091,29 @@ func IsValidS3BucketName(name string) bool {
 	return validBucketNameRegex.MatchString(name)
 }
 
-// GetFlagStringOrPrompt returns flag value but if empty will promtp to read from stdin
+// GetFlagIntOrPrompt returns flag value but if empty will prompt to read from stdin
+func GetFlagIntOrPrompt(cmd *cobra.Command, flag string) int {
+	val, _ := cmd.Flags().GetInt(flag)
+	if val != -1 {
+		return val
+	}
+	fmt.Printf("Enter %s: ", flag)
+	_, err := fmt.Scan(&val)
+
+	if err != nil {
+		if strings.Contains(err.Error(), "expected integer") {
+			log.Fatalf(`❌ The flag %s must be an integer`, flag)
+		}
+	}
+
+	Panic(err)
+	if val == -1 {
+		log.Fatalf(`❌ Missing %s %s`, flag, cmd.UsageString())
+	}
+	return val
+}
+
+// GetFlagStringOrPrompt returns flag value but if empty will prompt to read from stdin
 func GetFlagStringOrPrompt(cmd *cobra.Command, flag string) string {
 	str, _ := cmd.Flags().GetString(flag)
 	if str != "" {
@@ -880,7 +1137,7 @@ func GetFlagStringOrPromptPassword(cmd *cobra.Command, flag string) string {
 		return str
 	}
 	fmt.Printf("Enter %s: ", flag)
-	bytes, err := terminal.ReadPassword(0)
+	bytes, err := term.ReadPassword(0)
 	Panic(err)
 	str = string(bytes)
 	fmt.Printf("[got %d characters]\n", len(str))
@@ -935,6 +1192,22 @@ func IsStringGraphicOrSpacesCharsOnly(s string) bool {
 		}
 	}
 	return true
+}
+
+// VerifyCredsInSecret throws fatal error when a given secret doesn't contain the mandatory properties
+func VerifyCredsInSecret(secretName string, namespace string, mandatoryProperties []string) {
+	secret := KubeObject(bundle.File_deploy_internal_secret_empty_yaml).(*corev1.Secret)
+	secret.Name = secretName
+	secret.Namespace = namespace
+	if !KubeCheck(secret) {
+		log.Fatalf("secret %q does not exist", secretName)
+	}
+	for _, p := range mandatoryProperties {
+		cred, ok := secret.StringData[p]
+		if cred == "" || !ok {
+			log.Fatalf("❌ secret %q does not contain property %q", secret.Name, p)
+		}
+	}
 }
 
 // Tar takes a source and variable writers and walks 'source' writing each file
@@ -1013,12 +1286,10 @@ func WriteYamlFile(name string, obj runtime.Object, moreObjects ...runtime.Objec
 		return err
 	}
 
-	if moreObjects != nil {
-		for i := range moreObjects {
-			err = p.PrintObj(moreObjects[i], file)
-			if err != nil {
-				return err
-			}
+	for i := range moreObjects {
+		err = p.PrintObj(moreObjects[i], file)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -1069,6 +1340,113 @@ func ReflectEnvVariable(env *[]corev1.EnvVar, name string) {
 	}
 }
 
+// MergeVolumeList takes two Volume arrays and merge them into the first
+func MergeVolumeList(existing, template *[]corev1.Volume) {
+	existingElements := make(map[string]bool)
+
+	for _, item := range *existing {
+		existingElements[item.Name] = true
+	}
+
+	for _, item := range *template {
+		if !existingElements[item.Name] {
+			*existing = append(*existing, item)
+		}
+	}
+}
+
+// MergeVolumeMountList takes two VolumeMount arrays and merge them into the first
+func MergeVolumeMountList(existing, template *[]corev1.VolumeMount) {
+	existingElements := make(map[string]bool)
+
+	for _, item := range *existing {
+		existingElements[item.Name] = true
+	}
+
+	for _, item := range *template {
+		if !existingElements[item.Name] {
+			*existing = append(*existing, item)
+		}
+	}
+}
+
+// GetCmDataHash calculates a Hash string repersnting an array of key value strings
+func GetCmDataHash(input map[string]string) string {
+	b := new(bytes.Buffer)
+
+	keys := make([]string, 0, len(input))
+	for k := range input {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		// Convert each key/value pair in the map to a string
+		fmt.Fprintf(b, "%s=\"%s\"\n", k, input[k])
+	}
+
+	sha256Bytes := sha256.Sum256(b.Bytes())
+	sha256Hex := hex.EncodeToString(sha256Bytes[:])
+	return sha256Hex
+}
+
+// MergeEnvArrays takes two Env variables arrays and merge them into the first
+func MergeEnvArrays(envA, envB *[]corev1.EnvVar) {
+	existingEnvs := make(map[string]bool)
+
+	for _, item := range *envA {
+		existingEnvs[item.Name] = true
+	}
+
+	for _, item := range *envB {
+		if !existingEnvs[item.Name] {
+			*envA = append(*envA, item)
+		}
+	}
+}
+
+// HumanizeDuration humanizes time.Duration output to a meaningful value - will show days/years
+func HumanizeDuration(duration time.Duration) string {
+	const (
+		oneDay  = time.Minute * 60 * 24
+		oneYear = 365 * oneDay
+	)
+	if duration < oneDay {
+		return duration.String()
+	}
+
+	var builder strings.Builder
+
+	if duration >= oneYear {
+		years := duration / oneYear
+		fmt.Fprintf(&builder, "%dy", years)
+		duration -= years * oneYear
+	}
+
+	days := duration / oneDay
+	duration -= days * oneDay
+	fmt.Fprintf(&builder, "%dd%s", days, duration)
+
+	return builder.String()
+}
+
+// IsStringArrayUnorderedEqual checks if two string arrays has the same members
+func IsStringArrayUnorderedEqual(stringsArrayA, stringsArrayB []string) bool {
+	if len(stringsArrayA) != len(stringsArrayB) {
+		return false
+	}
+	existingStrings := make(map[string]bool)
+	for _, item := range stringsArrayA {
+		existingStrings[item] = true
+	}
+	for _, item := range stringsArrayB {
+		if !existingStrings[item] {
+			return false
+		}
+	}
+	return true
+}
+
 // EnsureCommonMetaFields ensures that the resource has all mandatory meta fields
 func EnsureCommonMetaFields(object metav1.Object, finalizer string) bool {
 	updated := false
@@ -1091,4 +1469,148 @@ func EnsureCommonMetaFields(object metav1.Object, finalizer string) bool {
 
 	}
 	return updated
+}
+
+// GetWatchNamespace returns the namespace the operator should be watching for changes
+// this was implemented in operator-sdk v0.17 and removed. copied from here:
+// https://github.com/operator-framework/operator-sdk/blob/53b00d125fb12515cd74fb169149913b401c8995/pkg/k8sutil/k8sutil.go#L45
+func GetWatchNamespace() (string, error) {
+	const WatchNamespaceEnvVar = "WATCH_NAMESPACE"
+	ns, found := os.LookupEnv(WatchNamespaceEnvVar)
+	if !found {
+		return "", fmt.Errorf("%s must be set", WatchNamespaceEnvVar)
+	}
+	if len(ns) == 0 {
+		return "", fmt.Errorf("%s must not be empty", WatchNamespaceEnvVar)
+	}
+	return ns, nil
+}
+
+// DeleteStorageClass deletes storage class
+func DeleteStorageClass(sc *storagev1.StorageClass) error {
+	log.Infof("storageclass %v found, deleting..", sc.Name)
+	if !KubeDelete(sc) {
+		return fmt.Errorf("storageclass %q failed to delete", sc)
+	}
+	log.Infof("deleted storageclass %v successfully", sc.Name)
+	return nil
+}
+
+// LoadBucketReplicationJSON loads the bucket replication from a json file
+func LoadBucketReplicationJSON(replicationJSONFilePath string) (string, error) {
+
+	logrus.Infof("loading bucket replication %v", replicationJSONFilePath)
+	bytes, err := ioutil.ReadFile(replicationJSONFilePath)
+	if err != nil {
+		return "", fmt.Errorf("Failed to read file %q: %v", replicationJSONFilePath, err)
+	}
+	var replicationJSON []interface{}
+	err = json.Unmarshal(bytes, &replicationJSON)
+	if err != nil {
+		return "", fmt.Errorf("Failed to parse json file %q: %v", replicationJSONFilePath, err)
+	}
+
+	logrus.Infof("✅ Successfully loaded bucket replication %v", string(bytes))
+
+	return string(bytes), nil
+}
+
+// NoobaaStatus returns true if NooBaa condition type and status matches
+// returns false otherwise
+func NoobaaStatus(nb *nbv1.NooBaa, t conditionsv1.ConditionType, status corev1.ConditionStatus) bool {
+	for _, cond := range nb.Status.Conditions {
+		log.Printf("condition type %v status %v", cond.Type, cond.Status)
+		if cond.Type == t && cond.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateQuotaConfig maxSize and maxObjects value of obc or bucketclass
+func ValidateQuotaConfig(name string, maxSize string, maxObjects string) error {
+
+	// Positive number
+	if maxObjects != "" {
+		obcMaxObjectsInt, err := strconv.ParseInt(maxObjects, 10, 32)
+		if err != nil {
+			return ValidationError{
+				Msg: fmt.Sprintf("ob %q validation error: failed to parse maxObjects %v, %v", name, maxObjects, err),
+			}
+		}
+		if obcMaxObjectsInt < 0 {
+			return ValidationError{
+				Msg: fmt.Sprintf("ob %q validation error: invalid maxObjects value. O or any positive number ", name),
+			}
+		}
+	}
+
+	//Valid range 0, 1G - 1023P
+	if maxSize != "" {
+		quantity, err := resource.ParseQuantity(maxSize)
+		if err != nil {
+			log.Errorf("failed to parse quantity: %v", maxSize)
+			return err
+		}
+		obcMaxSizeValue := quantity.Value()
+		if obcMaxSizeValue != 0 && (obcMaxSizeValue < gigabyte || obcMaxSizeValue > obcMaxSizeUpperLimit) {
+			return ValidationError{
+				Msg: fmt.Sprintf("ob %q validation error: invalid obcMaxSizeValue value: min 1Gi, max 1023Pi, 0 to remove quota", name),
+			}
+		}
+	}
+
+	return nil
+}
+
+//
+// Test shared utilities
+//
+
+// NooBaaCondStatus waits for requested NooBaa CR KMS condition status
+// returns false if timeout
+func NooBaaCondStatus(noobaa *nbv1.NooBaa, s corev1.ConditionStatus) bool {
+	return NooBaaCondition(noobaa, nbv1.ConditionTypeKMSStatus, s)
+}
+
+// NooBaaCondition waits for requested NooBaa CR KMS condition type & status
+// returns false if timeout
+func NooBaaCondition(noobaa *nbv1.NooBaa, t conditionsv1.ConditionType, s corev1.ConditionStatus) bool {
+	found := false
+
+	timeout := 120 // seconds
+	for i := 0; i < timeout; i++ {
+		_, _, err := KubeGet(noobaa)
+		Panic(err)
+
+		if NoobaaStatus(noobaa, t, s) {
+			found = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	return found
+}
+
+// GetAvailabeKubeCli will check which k8s cli command is availabe in the system: oc or kubectl
+// returns one of: "oc" or "kubectl"
+func GetAvailabeKubeCli() string {
+	kubeCommand := "kubectl"
+	cmd := exec.Command(kubeCommand)
+	err := cmd.Run(); 
+	if err == nil {
+		log.Printf("✅ kubectl exists - will use it for diagnostics\n")
+	} else {
+		log.Printf("❌ Could not find kubectl, will try to use oc instead, error: %s\n", err)
+		kubeCommand = "oc"
+		cmd = exec.Command(kubeCommand)
+		err = cmd.Run(); 
+		if err == nil {
+			log.Printf("✅ oc exists - will use it for diagnostics\n")
+		} else {
+			log.Fatalf("❌ Could not find both kubectl and oc, will stop running diagnostics, error: %s", err)
+		}
+	}
+	return kubeCommand
 }

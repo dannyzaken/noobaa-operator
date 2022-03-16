@@ -1,9 +1,11 @@
 package backingstore
 
 import (
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/backingstore"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	"context"
+
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/backingstore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -24,7 +26,7 @@ func Add(mgr manager.Manager) error {
 	c, err := controller.New("noobaa-controller", mgr, controller.Options{
 		MaxConcurrentReconciles: 1,
 		Reconciler: reconcile.Func(
-			func(req reconcile.Request) (reconcile.Result, error) {
+			func(context context.Context, req reconcile.Request) (reconcile.Result, error) {
 				return backingstore.NewReconciler(
 					req.NamespacedName,
 					mgr.GetClient(),
@@ -39,6 +41,12 @@ func Add(mgr manager.Manager) error {
 
 	// Predicate that allow us to log event that are being queued
 	logEventsPredicate := util.LogEventsPredicate{}
+
+	// Predicate that filter events by their owner
+	filterForOwnerPredicate := util.FilterForOwner{
+		OwnerType: &nbv1.BackingStore{},
+		Scheme:    mgr.GetScheme(),
+	}
 
 	// Predicate that allows events that only change spec, labels or finalizers and will log any allowed events
 	// This will stop infinite reconciles that triggered by status or irrelevant metadata changes
@@ -57,11 +65,11 @@ func Add(mgr manager.Manager) error {
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}

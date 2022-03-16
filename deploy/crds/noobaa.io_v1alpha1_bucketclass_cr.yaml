@@ -3,7 +3,3 @@ kind: BucketClass
 metadata:
   name: default
 spec:
-  placementPolicy:
-    tiers:
-    - backingStores:
-      - aws1

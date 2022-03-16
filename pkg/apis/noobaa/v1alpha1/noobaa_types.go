@@ -14,6 +14,18 @@ func init() {
 	SchemeBuilder.Register(&NooBaa{}, &NooBaaList{})
 }
 
+// Labels are label for a given daemon
+type Labels map[string]string
+
+// LabelsSpec is the main spec label for all daemons
+type LabelsSpec map[string]Labels
+
+// Annotations are annotation for a given daemon
+type Annotations map[string]string
+
+// AnnotationsSpec is the main spec annotation for all daemons
+type AnnotationsSpec map[string]Annotations
+
 // NooBaa is the Schema for the NooBaas API
 // +k8s:openapi-gen=true
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -21,6 +33,7 @@ func init() {
 // +kubebuilder:resource:shortName=nb
 // +kubebuilder:printcolumn:name="Mgmt-Endpoints",type="string",JSONPath=".status.services.serviceMgmt.nodePorts",description="Management Endpoints"
 // +kubebuilder:printcolumn:name="S3-Endpoints",type="string",JSONPath=".status.services.serviceS3.nodePorts",description="S3 Endpoints"
+// +kubebuilder:printcolumn:name="Sts-Endpoints",type="string",JSONPath=".status.services.serviceSts.nodePorts",description="STS Endpoints"
 // +kubebuilder:printcolumn:name="Image",type="string",JSONPath=".status.actualImage",description="Actual Image"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
@@ -68,6 +81,10 @@ type NooBaaSpec struct {
 	// +optional
 	DBImage *string `json:"dbImage,omitempty"`
 
+	// DBConf (optional) overrides the default postgresql db config
+	// +optional
+	DBConf *string `json:"dbConf,omitempty"`
+
 	// DBType (optional) overrides the default type image for the db container
 	// +optional
 	// +kubebuilder:validation:Enum=mongodb;postgres
@@ -96,6 +113,15 @@ type NooBaaSpec struct {
 	// +immutable
 	// +optional
 	DBStorageClass *string `json:"dbStorageClass,omitempty"`
+
+	// MongoDbURL (optional) overrides the default mongo db remote url
+	// +optional
+	MongoDbURL string `json:"mongoDbURL,omitempty"`
+
+	// DebugLevel (optional) sets the debug level
+	// +optional
+	// +kubebuilder:validation:Enum=all;nsfs;warn;default_level
+	DebugLevel int `json:"debugLevel,omitempty"`
 
 	// PVPoolDefaultStorageClass (optional) overrides the default cluster StorageClass for the pv-pool volumes.
 	// This affects where the system stores data chunks (encrypted).
@@ -134,6 +160,40 @@ type NooBaaSpec struct {
 	// CleanupPolicy (optional) Indicates user's policy for deletion
 	// +optional
 	CleanupPolicy CleanupPolicySpec `json:"cleanupPolicy,omitempty"`
+
+	// Security represents security settings
+	Security SecuritySpec `json:"security,omitempty"`
+
+	// The labels-related configuration to add/set on each Pod related object.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +nullable
+	// +optional
+	Labels LabelsSpec `json:"labels,omitempty"`
+
+	// The annotations-related configuration to add/set on each Pod related object.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +nullable
+	// +optional
+	Annotations AnnotationsSpec `json:"annotations,omitempty"`
+
+	// DisableLoadBalancerService (optional) sets the service type to ClusterIP instead of LoadBalancer
+	// +nullable
+	// +optional
+	DisableLoadBalancerService bool `json:"disableLoadBalancerService,omitempty"`
+
+	// +optional
+	DefaultBackingStoreSpec *BackingStoreSpec `json:"defaultBackingStoreSpec,omitempty"`
+}
+
+// SecuritySpec is security spec to include various security items such as kms
+type SecuritySpec struct {
+	KeyManagementService KeyManagementServiceSpec `json:"kms,omitempty"`
+}
+
+// KeyManagementServiceSpec represent various details of the KMS server
+type KeyManagementServiceSpec struct {
+	ConnectionDetails map[string]string `json:"connectionDetails,omitempty"`
+	TokenSecretName   string            `json:"tokenSecretName,omitempty"`
 }
 
 // EndpointsSpec defines the desired state of noobaa endpoint deployment
@@ -198,6 +258,10 @@ type NooBaaStatus struct {
 	// +optional
 	Endpoints *EndpointsStatus `json:"endpoints,omitempty"`
 
+	// Upgrade reports the status of the ongoing upgrade process
+	// +optional
+	UpgradePhase UpgradePhase `json:"upgradePhase,omitempty"`
+
 	// Readme is a user readable string with explanations on the system
 	// +optional
 	Readme string `json:"readme,omitempty"`
@@ -230,27 +294,28 @@ const (
 	SystemPhaseReady SystemPhase = "Ready"
 )
 
-// ConditionType is a simple string type.
-// Types should be used from the enum below.
-type ConditionType string
-
 // These are the valid conditions types and statuses:
 const (
-	ConditionTypePhase ConditionType = "Phase"
+	ConditionTypeKMSStatus conditionsv1.ConditionType = "KMS-Status"
+	ConditionTypeKMSType   conditionsv1.ConditionType = "KMS-Type"
 )
 
-// ConditionStatus is a simple string type.
-// In addition to the generic True/False/Unknown it also can accept SystemPhase enums
-type ConditionStatus string
-
-// These are general valid condition statuses. "ConditionTrue" means a resource is in the condition.
-// "ConditionFalse" means a resource is not in the condition. "ConditionUnknown" means kubernetes
-// can't decide if a resource is in the condition or not. In the future, we could add other
-// intermediate conditions, e.g. ConditionDegraded.
+// These are NooBaa condition statuses
 const (
-	ConditionTrue    ConditionStatus = "True"
-	ConditionFalse   ConditionStatus = "False"
-	ConditionUnknown ConditionStatus = "Unknown"
+	// External KMS initialized
+	ConditionKMSInit corev1.ConditionStatus = "Init"
+
+	// The root key was synchronized from external KMS
+	ConditionKMSSync corev1.ConditionStatus = "Sync"
+
+	// Invalid external KMS definition
+	ConditionKMSInvalid corev1.ConditionStatus = "Invalid"
+
+	// Error reading secret from external KMS
+	ConditionKMSErrorRead corev1.ConditionStatus = "ErrorRead"
+
+	// Error writing initial root key to eternal KMS
+	ConditionKMSErrorWrite corev1.ConditionStatus = "ErrorWrite"
 )
 
 // AccountsStatus is the status info of admin account
@@ -262,6 +327,7 @@ type AccountsStatus struct {
 type ServicesStatus struct {
 	ServiceMgmt ServiceStatus `json:"serviceMgmt"`
 	ServiceS3   ServiceStatus `json:"serviceS3"`
+	ServiceSts  ServiceStatus `json:"serviceSts"`
 }
 
 // UserStatus is the status info of a user secret
@@ -316,6 +382,22 @@ type EndpointsStatus struct {
 	ReadyCount   int32    `json:"readyCount"`
 	VirtualHosts []string `json:"virtualHosts"`
 }
+
+// UpgradePhase is a string enum type for upgrade phases
+type UpgradePhase string
+
+// These are the valid phases:
+const (
+	UpgradePhaseNone UpgradePhase = "NoUpgrade"
+
+	UpgradePhasePrepare UpgradePhase = "Preparing"
+
+	UpgradePhaseMigrate UpgradePhase = "Migrating"
+
+	UpgradePhaseClean UpgradePhase = "Cleanning"
+
+	UpgradePhaseFinished UpgradePhase = "DoneUpgrade"
+)
 
 // CleanupPolicySpec specifies the cleanup policy
 type CleanupPolicySpec struct {

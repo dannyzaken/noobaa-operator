@@ -1,24 +1,27 @@
 package operator
 
 import (
+	"context"
 	"fmt"
+	"os"
 
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/system"
-	"github.com/noobaa/noobaa-operator/v2/pkg/version"
+	"github.com/noobaa/noobaa-operator/v5/pkg/admission"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/system"
+	"github.com/noobaa/noobaa-operator/v5/pkg/version"
 
 	"github.com/spf13/cobra"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/noobaa/noobaa-operator/v2/pkg/apis"
-	"github.com/noobaa/noobaa-operator/v2/pkg/controller"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/pkg/apis"
+	"github.com/noobaa/noobaa-operator/v5/pkg/controller"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 
-	"github.com/operator-framework/operator-sdk/pkg/leader"
+	"github.com/operator-framework/operator-lib/leader"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 // Change below variables to serve metrics on different host or port.
@@ -63,9 +66,8 @@ func RunOperator(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed AddToManager: %s", err)
 	}
 
-	util.Panic(mgr.Add(manager.RunnableFunc(func(stopChan <-chan struct{}) error {
+	util.Panic(mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		system.RunOperatorCreate(cmd, args)
-		<-stopChan
 		return nil
 	})))
 
@@ -74,6 +76,14 @@ func RunOperator(cmd *cobra.Command, args []string) {
 	// if err != nil {
 	// 	log.Warnf("Failed ExposeMetricsPort: %s", err)
 	// }
+
+	enableAdmission, ok := os.LookupEnv("ENABLE_NOOBAA_ADMISSION")
+	if ok && enableAdmission == "true" {
+		// start webhook server in new routine
+		go func() {
+			admission.RunAdmissionServer()
+		}()
+	}
 
 	// Start the manager
 	log.Info("Starting the Operator ...")

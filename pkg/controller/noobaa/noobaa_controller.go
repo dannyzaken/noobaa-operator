@@ -1,11 +1,13 @@
 package noobaa
 
 import (
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/nb"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/system"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	"context"
+
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/nb"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/system"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/sirupsen/logrus"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,6 +15,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -27,7 +30,7 @@ type NotificationSource struct {
 }
 
 // Start will setup s.Queue field
-func (s *NotificationSource) Start(handler handler.EventHandler, q workqueue.RateLimitingInterface, predicates ...predicate.Predicate) error {
+func (s *NotificationSource) Start(context context.Context, handler handler.EventHandler, q workqueue.RateLimitingInterface, predicates ...predicate.Predicate) error {
 	s.Queue = q
 	return nil
 }
@@ -41,7 +44,7 @@ func Add(mgr manager.Manager) error {
 	c, err := controller.New("noobaa-controller", mgr, controller.Options{
 		MaxConcurrentReconciles: 1,
 		Reconciler: reconcile.Func(
-			func(req reconcile.Request) (reconcile.Result, error) {
+			func(context context.Context, req reconcile.Request) (reconcile.Result, error) {
 				return system.NewReconciler(
 					req.NamespacedName,
 					mgr.GetClient(),
@@ -56,6 +59,12 @@ func Add(mgr manager.Manager) error {
 
 	// Predicate that allow us to log event that are being queued
 	logEventsPredicate := util.LogEventsPredicate{}
+
+	// Predicate that filter events that noobaa is not their owner
+	filterForOwnerPredicate := util.FilterForOwner{
+		OwnerType: &nbv1.NooBaa{},
+		Scheme:    mgr.GetScheme(),
+	}
 
 	// Predicate that allows events that only change spec, labels or finalizers will log any allowed events
 	// This will stop infinite reconciles that triggered by status or irrelevant metadata changes
@@ -73,26 +82,29 @@ func Add(mgr manager.Manager) error {
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.Service{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &corev1.Service{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, ownerHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	if err != nil {
+		return err
+	}
+	err = c.Watch(&source.Kind{Type: &corev1.ConfigMap{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
 
-	storageClassHandler := handler.EnqueueRequestsFromMapFunc{
-		ToRequests: handler.ToRequestsFunc(func(mo handler.MapObject) []reconcile.Request {
-			sc, ok := mo.Object.(*storagev1.StorageClass)
+	storageClassHandler := handler.EnqueueRequestsFromMapFunc(func(mo client.Object) []reconcile.Request {
+			sc, ok := mo.(*storagev1.StorageClass)
 			if !ok || sc.Provisioner != options.ObjectBucketProvisionerName() {
 				return nil
 			}
@@ -102,10 +114,11 @@ func Add(mgr manager.Manager) error {
 					Namespace: options.Namespace,
 				},
 			}}
-		}),
-	}
+		},
+	)
+
 	// Watch for StorageClass changes to trigger reconcile and recreate it when deleted
-	err = c.Watch(&source.Kind{Type: &storagev1.StorageClass{}}, &storageClassHandler, &logEventsPredicate)
+	err = c.Watch(&source.Kind{Type: &storagev1.StorageClass{}}, storageClassHandler, &logEventsPredicate)
 	if err != nil {
 		return err
 	}
@@ -118,7 +131,7 @@ func Add(mgr manager.Manager) error {
 
 	// handler for global RPC message and ,simply trigger a reconcile on every message
 	nb.GlobalRPC.Handler = func(req *nb.RPCMessage) (interface{}, error) {
-		logrus.Infof("RPC Handle: %+v", req)
+		logrus.Infof("RPC Handle: {Op: %s, API: %s, Method: %s, Error: %s, Params: %+v}", req.Op, req.API, req.Method, req.Error, req.Params)
 		notificationSource.Queue.AddRateLimited(reconcile.Request{NamespacedName: types.NamespacedName{
 			Name:      options.SystemName,
 			Namespace: options.Namespace,

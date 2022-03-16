@@ -1,18 +1,48 @@
 [NooBaa Operator](../README.md) /
 # BucketClass CRD
 
-NooBaaBucket CRD represents a class for buckets that defines policies for data placement and more.
+NooBaaBucket CRD represents a class for buckets that defines policies for data placement, namespace, replication policy and more.
 
 Data placement capabilities are built as a multi-layer structure, here are the layers bottom-up:
 - Spread Layer - list of backing-stores, aggregates the storage of multiple stores.
 - Mirroring Layer - list of spread-layers, async-mirroring to all mirrors, with locality optimization (will allocate on the closest region to the source endpoint), mirroring requires at least two backing-stores.
 - Tiering Layer - list of mirroring-layers, push cold data to next tier.
 
+Namespace policy:
+A namespace bucket-class will define a policy for namespace buckets.
+Namespace policy will require a type, the type's value can be one of the following: single, multi, cache.
+
+
+Namespace policy of type single will require the following configuration:
+  - Resource - a single namespace-store, defines the read and write target of the namespace bucket.
+
+Namespace policy of type multi will require the following configuration:
+- Read Resources - list of namespace-stores, defines the read targets of the namespace bucket.
+- Write Resource - a single namespace-store, defines the write target of the namespace bucket.
+
+Namespace policy of type cache will require the following configuration:
+  - Hub Resource - a single namespace-store, defines the read and write target of the namespace bucket.
+  - TTL - defines the TTL of the cached data.
+
+
+Replication policy:
+A bucket-class will define a replication policy when an admin would like to replicate objects 
+within noobaa bucket to another noobaa bucket (source/destination buckets can be regular/namespace buckets).
+
+Replication policy will require the content of a JSON file which defines array of rules.
+  - Each rule is an object contains rule_id, destination bucket and optional filter object that contains prefix field.
+  - When a filter with prefix is defined - only objects keys that match prefix, will be replicated.
+
 Constraints:
 A backing-store name may appear in more than one bucket-class but may not appear more than once in a single bucket-class.
-The operator cli currently only supports a single tier placement-policy for a bucket-class. 
+The operator cli currently only supports a single tier placement-policy for a bucket-class.
+Upon creating regular buckets, the user will first need to create a placement-bucketclass which contains placemant policy.
+Upon creating namespace buckets, the user will first need to create a namespace-bucketclass which contains namespace policy.
+A namespace bucket class of type cache must contain both Placement-policy or Namespace-policy.
+A namespace bucket class of type single/multi must contain Namespace-policy.
 YAML must be used to create a bucket-class with a placement-policy that has multiple tiers.
 Placement-policy is case sensitive and should be of value (Mirror|Spread).
+Namespace-policy is case sensitive.
 
 For more information on using bucket-classes from S3 see [S3 Account](s3-account.md).
 
@@ -76,7 +106,7 @@ Here are some examples of the cli/YAML usage and BucketClass CRs for the differe
 
 Single tier, single backing-store, placement Spread:
 ```shell
-noobaa -n noobaa bucketclass create bc --backingstores bs --placement Spread
+noobaa -n noobaa bucketclass create placement-bucketclass bc --backingstores bs --placement Spread
 ```
 ```yaml
 apiVersion: noobaa.io/v1alpha1
@@ -96,7 +126,7 @@ spec:
 
 Single tier, two backing-stores, placement Spread:
 ```shell
-noobaa -n noobaa bucketclass create bc --backingstores bs1,bs2 --placement Spread
+noobaa -n noobaa bucketclass create placement-bucketclass bc --backingstores bs1,bs2 --placement Spread
 ```
 ```yaml
 apiVersion: noobaa.io/v1alpha1
@@ -117,7 +147,7 @@ spec:
 
 Single tier, two backing-store, placement Mirror:
 ```shell
-noobaa -n noobaa bucketclass create bc --backingstores bs1,bs2 --placement Mirror
+noobaa -n noobaa bucketclass create placement-bucketclass bc --backingstores bs1,bs2 --placement Mirror
 ```
 ```yaml
 apiVersion: noobaa.io/v1alpha1
@@ -176,4 +206,93 @@ spec:
       - bs3
       - bs4
       placement: Mirror
+```
+
+Namespace bucketclass:
+```shell
+noobaa -n noobaa bucketclass create namespace-bucketclass single bc --resource azure-blob-ns
+```
+```yaml
+apiVersion: noobaa.io/v1alpha1
+kind: BucketClass
+metadata:
+  labels:
+    app: noobaa
+  name: bc
+  namespace: noobaa
+spec:
+  namespacePolicy:
+    type: Single
+    single: 
+      resource: azure-blob-ns
+```
+
+Namespace bucketclass:
+```shell
+noobaa -n noobaa bucketclass create namespace-bucketclass multi bc --write-resource aws-s3-ns --read-resources aws-s3-ns,azure-blob-ns 
+```
+```yaml
+apiVersion: noobaa.io/v1alpha1
+kind: BucketClass
+metadata:
+  labels:
+    app: noobaa
+  name: bc
+  namespace: noobaa
+spec:
+  namespacePolicy:
+    type: Multi
+    multi:
+      writeResource: aws-s3-ns 
+      readResources:
+      - aws-s3-ns
+      - azure-blob-ns
+```
+
+Namespace bucketclass:
+```shell
+noobaa -n noobaa bucketclass create namespace-bucketclass cache bc --hub-resource ibm-cos-ns --ttl 36000 --backingstores noobaa-default-backing-store
+```
+```yaml
+apiVersion: noobaa.io/v1alpha1
+kind: BucketClass
+metadata:
+  labels:
+    app: noobaa
+  name: bc
+  namespace: noobaa
+spec:
+  namespacePolicy:
+    type: Cache
+    cache:
+      caching:
+        ttl: 36000
+      hubResource: ibm-cos-ns 
+  placementPolicy:
+    tiers:
+    - backingStores:
+      - noobaa-default-backing-store
+```
+
+
+Namespace bucketclass with replication to first.bucket:
+
+/path/to/json-file.json is the path to a JSON file which defines the replication policy
+```shell
+noobaa -n noobaa bucketclass create namespace-bucketclass single bc --resource azure-blob-ns --replication-policy=/path/to/json-file.json
+```
+```yaml
+apiVersion: noobaa.io/v1alpha1
+kind: BucketClass
+metadata:
+  labels:
+    app: noobaa
+  name: bc
+  namespace: noobaa
+spec:
+  namespacePolicy:
+    type: Single
+    single: 
+      resource: azure-blob-ns
+  replicationPolicy: [{ "rule_id": "rule-1", "destination_bucket": "first.bucket", "filter": {"prefix": "ba"}}]
 ```

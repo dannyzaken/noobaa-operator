@@ -1,3 +1,8 @@
+[![slack](https://img.shields.io/badge/slack-noobaa-brightgreen.svg?logo=slack)](https://www.noobaa.io/community)
+[![noobaa-core](https://img.shields.io/github/v/release/noobaa/noobaa-core?label=noobaa-core)](https://github.com/noobaa/noobaa-core/releases/latest)
+[![noobaa-operator](https://img.shields.io/github/v/release/noobaa/noobaa-operator?label=noobaa-operator)](https://github.com/noobaa/noobaa-operator/releases/latest)
+<div id="top"></div>
+
 # NooBaa Operator
 
 NooBaa is an object data service for hybrid and multi cloud environments. NooBaa runs on kubernetes, provides an S3 object store service (and Lambda with bucket triggers) to clients both inside and outside the cluster, and uses storage resources from within or outside the cluster, with flexible placement policies to automate data use cases.
@@ -99,7 +104,7 @@ The following options can be passed to any command:
 out-of-cluster.
       --mini=false: Signal the operator that it is running in a low resource environment
   -n, --namespace='noobaa': Target namespace
-      --noobaa-image='noobaa/noobaa-core:5.5.0-rc2': NooBaa image
+      --noobaa-image='noobaa/noobaa-core:5.6.0': NooBaa image
       --operator-image='noobaa/noobaa-operator:5.6.0': Operator image
       --pv-pool-default-storage-class='': The default storage class name for BackingStores of type pv-pool
 
@@ -108,9 +113,9 @@ out-of-cluster.
 ```shell
 $ noobaa version
 
-INFO[0000] CLI version: 5.6.0
-INFO[0000] noobaa-image: noobaa/noobaa-core:5.5.0-rc2
-INFO[0000] operator-image: noobaa/noobaa-operator:5.6.0
+INFO[0000] CLI version: 5.10.0
+INFO[0000] noobaa-image: noobaa/noobaa-core:5.10.0
+INFO[0000] operator-image: noobaa/noobaa-operator:5.10.0
 
 ```
 
@@ -127,7 +132,8 @@ INFO[0000] operator-image: noobaa/noobaa-operator:5.6.0
 - [About NooBaa](doc/about-noobaa.md)
 - CRDs
     - [NooBaa](doc/noobaa-crd.md) - The basic CRD to deploy a NooBaa system.
-    - [BackingStore](doc/backing-store-crd.md) - Connection to cloud or local storage to use in policies.
+    - [BackingStore](doc/backing-store-crd.md) - Storage resources.
+    - [NamespaceStore](doc/namespace-store-crd.md) - Data resources.
     - [BucketClass](doc/bucket-class-crd.md) - Policies applied to a class of buckets.
 - [OBC Provisioner](doc/obc-provisioner.md) - Method to claim a new/existing bucket.
 
@@ -136,18 +142,6 @@ INFO[0000] operator-image: noobaa/noobaa-operator:5.6.0
 - Fork and clone the repo: `git clone https://github.com/<username>/noobaa-operator`
 - Use minikube: `minikube start`
 - Use your package manager to install `go` and `python3`.
-- Install operator-sdk
-    ```
-    OS="linux-gnu"
-    # or
-    OS="apple-darwin"
-    VERSION="v0.16.0"
-    curl -LO https://github.com/operator-framework/operator-sdk/releases/download/$VERSION/operator-sdk-$VERSION-x86_64-$OS
-    chmod +x operator-sdk-$VERSION-x86_64-$OS
-    mv operator-sdk-$VERSION-x86_64-$OS /usr/local/bin/operator-sdk
-    operator-sdk version
-    ```
-
 - Source the devenv into your shell: `. devenv.sh`
 - Build the project: `make`
 - Test with the alias `nb` that runs the local operator from `build/_output/bin` (alias created by devenv)

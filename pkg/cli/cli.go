@@ -7,20 +7,23 @@ import (
 	"os"
 	"time"
 
-	"github.com/noobaa/noobaa-operator/v2/pkg/backingstore"
-	"github.com/noobaa/noobaa-operator/v2/pkg/bucket"
-	"github.com/noobaa/noobaa-operator/v2/pkg/bucketclass"
-	"github.com/noobaa/noobaa-operator/v2/pkg/crd"
-	"github.com/noobaa/noobaa-operator/v2/pkg/diagnose"
-	"github.com/noobaa/noobaa-operator/v2/pkg/install"
-	"github.com/noobaa/noobaa-operator/v2/pkg/obc"
-	"github.com/noobaa/noobaa-operator/v2/pkg/olm"
-	"github.com/noobaa/noobaa-operator/v2/pkg/operator"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/pvstore"
-	"github.com/noobaa/noobaa-operator/v2/pkg/system"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
-	"github.com/noobaa/noobaa-operator/v2/pkg/version"
+	"github.com/noobaa/noobaa-operator/v5/pkg/backingstore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bucket"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bucketclass"
+	"github.com/noobaa/noobaa-operator/v5/pkg/crd"
+	"github.com/noobaa/noobaa-operator/v5/pkg/dbdump"
+	"github.com/noobaa/noobaa-operator/v5/pkg/diagnose"
+	"github.com/noobaa/noobaa-operator/v5/pkg/install"
+	"github.com/noobaa/noobaa-operator/v5/pkg/namespacestore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/noobaaaccount"
+	"github.com/noobaa/noobaa-operator/v5/pkg/obc"
+	"github.com/noobaa/noobaa-operator/v5/pkg/olm"
+	"github.com/noobaa/noobaa-operator/v5/pkg/operator"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/pvstore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/system"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/pkg/version"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -94,8 +97,13 @@ Load noobaa completion to bash:
 			if alias != "" {
 				rootCmd.Use = alias
 			}
-			rootCmd.GenBashCompletion(os.Stdout)
+			err := rootCmd.GenBashCompletion(os.Stdout)
+			if err != nil {
+				fmt.Printf("got error on GenBashCompletion. %v", err)
+			}
+
 		},
+		Args: cobra.NoArgs,
 	}
 	completionCmd.Flags().String("alias", "", "Custom alias name to generate the completion for")
 
@@ -110,10 +118,13 @@ Load noobaa completion to bash:
 		Message: "Manage:",
 		Commands: []*cobra.Command{
 			backingstore.Cmd(),
+			namespacestore.Cmd(),
 			bucketclass.Cmd(),
+			noobaaaccount.Cmd(),
 			obc.Cmd(),
 			diagnose.Cmd(),
 			system.CmdUI(),
+			dbdump.Cmd(),
 		},
 	}, {
 		Message: "Advanced:",

@@ -14,6 +14,9 @@ type Client interface {
 	ReadSystemAPI() (SystemInfo, error)
 	ReadBucketAPI(ReadBucketParams) (BucketInfo, error)
 	ReadPoolAPI(ReadPoolParams) (PoolInfo, error)
+	ReadNamespaceResourceAPI(ReadNamespaceResourceParams) (NamespaceResourceInfo, error)
+	ReadNamespaceResourceOperatorInfoAPI(ReadNamespaceResourceParams) (NamespaceResourceOperatorInfo, error)
+	SetNamespaceStoreInfo(NamespaceStoreInfo) error
 
 	ListAccountsAPI() (ListAccountsReply, error)
 	ListBucketsAPI() (ListBucketsReply, error)
@@ -23,20 +26,25 @@ type Client interface {
 	CreateSystemAPI(CreateSystemParams) (CreateSystemReply, error)
 	CreateAccountAPI(CreateAccountParams) (CreateAccountReply, error)
 	CreateBucketAPI(CreateBucketParams) error
+	UpdateBucketAPI(CreateBucketParams) error
+
 	CreateHostsPoolAPI(CreateHostsPoolParams) (string, error)
 	GetHostsPoolAgentConfigAPI(GetHostsPoolAgentConfigParams) (string, error)
 	UpdateHostsPoolAPI(UpdateHostsPoolParams) error
 	CreateCloudPoolAPI(CreateCloudPoolParams) error
+	UpdateCloudPoolAPI(UpdateCloudPoolParams) error
 	CreateTierAPI(CreateTierParams) error
+	CreateNamespaceResourceAPI(CreateNamespaceResourceParams) error
 	CreateTieringPolicyAPI(TieringPolicyInfo) error
 
 	DeleteBucketAPI(DeleteBucketParams) error
 	DeleteBucketAndObjectsAPI(DeleteBucketParams) error
 	DeleteAccountAPI(DeleteAccountParams) error
 	DeletePoolAPI(DeletePoolParams) error
+	DeleteNamespaceResourceAPI(DeleteNamespaceResourceParams) error
 
 	UpdateAccountS3Access(UpdateAccountS3AccessParams) error
-	UpdateAllBucketsDefaultPool(UpdateDefaultPoolParams) error
+	UpdateAllBucketsDefaultPool(UpdateDefaultResourceParams) error
 	UpdateBucketClass(UpdateBucketClassParams) (BucketClassInfo, error)
 
 	AddExternalConnectionAPI(AddExternalConnectionParams) error
@@ -47,6 +55,13 @@ type Client interface {
 	UpdateEndpointGroupAPI(UpdateEndpointGroupParams) error
 
 	RegisterToCluster() error
+
+	PutBucketReplicationAPI(BucketReplicationParams) error
+	ValidateReplicationAPI(BucketReplicationParams) error
+	DeleteBucketReplicationAPI(DeleteBucketReplicationParams) error
+
+	GenerateAccountKeysAPI(GenerateAccountKeysParams) error
+	ResetPasswordAPI(ResetPasswordParams) error
 }
 
 // ReadAuthAPI calls auth_api.read_auth()
@@ -187,6 +202,12 @@ func (c *RPCClient) CreateBucketAPI(params CreateBucketParams) error {
 	return c.Call(req, nil)
 }
 
+// UpdateBucketAPI calls bucket_api.update_bucket()
+func (c *RPCClient) UpdateBucketAPI(params CreateBucketParams) error {
+	req := &RPCMessage{API: "bucket_api", Method: "update_bucket", Params: params}
+	return c.Call(req, nil)
+}
+
 // CreateHostsPoolAPI calls pool_api.create_hosts_pool()
 func (c *RPCClient) CreateHostsPoolAPI(params CreateHostsPoolParams) (string, error) {
 	req := &RPCMessage{API: "pool_api", Method: "create_hosts_pool", Params: params}
@@ -218,6 +239,52 @@ func (c *RPCClient) UpdateHostsPoolAPI(params UpdateHostsPoolParams) error {
 // CreateCloudPoolAPI calls pool_api.create_cloud_pool()
 func (c *RPCClient) CreateCloudPoolAPI(params CreateCloudPoolParams) error {
 	req := &RPCMessage{API: "pool_api", Method: "create_cloud_pool", Params: params}
+	return c.Call(req, nil)
+}
+
+// UpdateCloudPoolAPI calls pool_api.update_cloud_pool()
+func (c *RPCClient) UpdateCloudPoolAPI(params UpdateCloudPoolParams) error {
+	req := &RPCMessage{API: "pool_api", Method: "update_cloud_pool", Params: params}
+	return c.Call(req, nil)
+}
+
+// CreateNamespaceResourceAPI calls pool_api.create_namespace_resource()
+func (c *RPCClient) CreateNamespaceResourceAPI(params CreateNamespaceResourceParams) error {
+	req := &RPCMessage{API: "pool_api", Method: "create_namespace_resource", Params: params}
+	return c.Call(req, nil)
+}
+
+// ReadNamespaceResourceAPI calls pool_api.read_namespace_resource()
+func (c *RPCClient) ReadNamespaceResourceAPI(params ReadNamespaceResourceParams) (NamespaceResourceInfo, error) {
+	req := &RPCMessage{API: "pool_api", Method: "read_namespace_resource", Params: params}
+	res := &struct {
+		RPCMessage `json:",inline"`
+		Reply      NamespaceResourceInfo `json:"reply"`
+	}{}
+	err := c.Call(req, res)
+	return res.Reply, err
+}
+
+// ReadNamespaceResourceOperatorInfoAPI calls pool_api.get_namespace_resource_operator_info()
+func (c *RPCClient) ReadNamespaceResourceOperatorInfoAPI(params ReadNamespaceResourceParams) (NamespaceResourceOperatorInfo, error) {
+	req := &RPCMessage{API: "pool_api", Method: "get_namespace_resource_operator_info", Params: params}
+	res := &struct {
+		RPCMessage `json:",inline"`
+		Reply      NamespaceResourceOperatorInfo `json:"reply"`
+	}{}
+	err := c.Call(req, res)
+	return res.Reply, err
+}
+
+// SetNamespaceStoreInfo calls pool_api.set_namespace_store_info()
+func (c *RPCClient) SetNamespaceStoreInfo(info NamespaceStoreInfo) error {
+	req := &RPCMessage{API: "pool_api", Method: "set_namespace_store_info", Params: info}
+	return c.Call(req, nil)
+}
+
+// DeleteNamespaceResourceAPI calls pool_api.delete_namespace_resource()
+func (c *RPCClient) DeleteNamespaceResourceAPI(params DeleteNamespaceResourceParams) error {
+	req := &RPCMessage{API: "pool_api", Method: "delete_namespace_resource", Params: params}
 	return c.Call(req, nil)
 }
 
@@ -275,7 +342,7 @@ func (c *RPCClient) UpdateBucketClass(params UpdateBucketClassParams) (BucketCla
 }
 
 // UpdateAllBucketsDefaultPool calls bucket_api.update_all_buckets_default_pool()
-func (c *RPCClient) UpdateAllBucketsDefaultPool(params UpdateDefaultPoolParams) error {
+func (c *RPCClient) UpdateAllBucketsDefaultPool(params UpdateDefaultResourceParams) error {
 	req := &RPCMessage{API: "bucket_api", Method: "update_all_buckets_default_pool", Params: params}
 	return c.Call(req, nil)
 }
@@ -318,5 +385,35 @@ func (c *RPCClient) UpdateEndpointGroupAPI(params UpdateEndpointGroupParams) err
 // RegisterToCluster calls redirector_api.RegisterToCluster()
 func (c *RPCClient) RegisterToCluster() error {
 	req := &RPCMessage{API: "redirector_api", Method: "register_to_cluster"}
+	return c.Call(req, nil)
+}
+
+// PutBucketReplicationAPI calls bucket_api.put_bucket_replication()
+func (c *RPCClient) PutBucketReplicationAPI(params BucketReplicationParams) error {
+	req := &RPCMessage{API: "bucket_api", Method: "put_bucket_replication", Params: params}
+	return c.Call(req, nil)
+}
+
+// ValidateReplicationAPI calls bucket_api.validate_replication()
+func (c *RPCClient) ValidateReplicationAPI(params BucketReplicationParams) error {
+	req := &RPCMessage{API: "bucket_api", Method: "validate_replication", Params: params}
+	return c.Call(req, nil)
+}
+
+// DeleteBucketReplicationAPI calls bucket_api.delete_bucket_replication()
+func (c *RPCClient) DeleteBucketReplicationAPI(params DeleteBucketReplicationParams) error {
+	req := &RPCMessage{API: "bucket_api", Method: "delete_bucket_replication", Params: params}
+	return c.Call(req, nil)
+}
+
+// GenerateAccountKeysAPI calls account_api.generate_account_keys()
+func (c *RPCClient) GenerateAccountKeysAPI(params GenerateAccountKeysParams) error {
+	req := &RPCMessage{API: "account_api", Method: "generate_account_keys", Params: params}
+	return c.Call(req, nil)
+}
+
+// ResetPasswordAPI calls account_api.reset_password()
+func (c *RPCClient) ResetPasswordAPI(params ResetPasswordParams) error {
+	req := &RPCMessage{API: "account_api", Method: "reset_password", Params: params}
 	return c.Call(req, nil)
 }

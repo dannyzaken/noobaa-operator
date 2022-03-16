@@ -3,15 +3,16 @@ package install
 import (
 	"fmt"
 
-	"github.com/noobaa/noobaa-operator/v2/pkg/backingstore"
-	"github.com/noobaa/noobaa-operator/v2/pkg/bucketclass"
-	"github.com/noobaa/noobaa-operator/v2/pkg/crd"
-	"github.com/noobaa/noobaa-operator/v2/pkg/obc"
-	"github.com/noobaa/noobaa-operator/v2/pkg/operator"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/system"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
-	"github.com/noobaa/noobaa-operator/v2/pkg/version"
+	"github.com/noobaa/noobaa-operator/v5/pkg/backingstore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bucketclass"
+	"github.com/noobaa/noobaa-operator/v5/pkg/crd"
+	"github.com/noobaa/noobaa-operator/v5/pkg/namespacestore"
+	"github.com/noobaa/noobaa-operator/v5/pkg/noobaaaccount"
+	"github.com/noobaa/noobaa-operator/v5/pkg/obc"
+	"github.com/noobaa/noobaa-operator/v5/pkg/operator"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/system"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -21,9 +22,39 @@ func CmdInstall() *cobra.Command {
 		Use:   "install",
 		Short: "Install the operator and create the noobaa system",
 		Run:   RunInstall,
+		Args:  cobra.NoArgs,
 	}
 	cmd.Flags().Bool("use-obc-cleanup-policy", false, "Create NooBaa system with obc cleanup policy")
+	cmd.AddCommand(
+		CmdYaml(),
+	)
 	return cmd
+}
+
+// CmdYaml returns a CLI command
+func CmdYaml() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "yaml",
+		Short: "Show install yaml, expected usage \"noobaa install 1> install.yaml\"",
+		Run:   RunYaml,
+		Args:  cobra.NoArgs,
+	}
+	return cmd
+}
+
+// RunYaml dumps a combined yaml of all installation yaml
+// including CRD, operator and system
+func RunYaml(cmd *cobra.Command, args []string) {
+	log := util.Logger()
+	log.Println("Dump CRD yamls...")
+	crd.RunYaml(cmd, args)
+	fmt.Println("---") // yaml resources separator
+	log.Println("Dump operator yamls...")
+	operator.RunYaml(cmd, args)
+	fmt.Println("---") // yaml resources separator
+	log.Println("Dump system yamls...")
+	system.RunYaml(cmd, args)
+	log.Println("✅ Done dumping installation yaml")
 }
 
 // CmdUninstall returns a CLI command
@@ -32,6 +63,7 @@ func CmdUninstall() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Uninstall the operator and delete the system",
 		Run:   RunUninstall,
+		Args:  cobra.NoArgs,
 	}
 	cmd.Flags().Bool("cleanup", false, "Enable deletion of Namespace and CRD's")
 	cmd.Flags().Bool("cleanup_data", false, "Clean object buckets")
@@ -44,6 +76,7 @@ func CmdStatus() *cobra.Command {
 		Use:   "status",
 		Short: "Status of the operator and the system",
 		Run:   RunStatus,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -51,7 +84,7 @@ func CmdStatus() *cobra.Command {
 // RunInstall runs a CLI command
 func RunInstall(cmd *cobra.Command, args []string) {
 	log := util.Logger()
-	version.RunVersion(cmd, args)
+	system.RunSystemVersionsStatus(cmd, args)
 	log.Printf("Namespace: %s", options.Namespace)
 	log.Printf("")
 	log.Printf("CRD Create:")
@@ -76,6 +109,24 @@ func RunInstall(cmd *cobra.Command, args []string) {
 // RunUninstall runs a CLI command
 func RunUninstall(cmd *cobra.Command, args []string) {
 	log := util.Logger()
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
+
+	if cleanup {
+		var decision string
+
+		for {
+			log.Printf("--cleanup removes the CRDs and affecting all noobaa instances, are you sure? y/n ")
+			fmt.Scanln(&decision)
+
+			if decision == "y" {
+				log.Printf("Will remove CRD (cluster scope)")
+				break
+			} else if decision == "n" {
+				return
+			}
+		}
+	}
+
 	system.RunSystemVersionsStatus(cmd, args)
 	log.Printf("Namespace: %s", options.Namespace)
 	log.Printf("")
@@ -85,7 +136,6 @@ func RunUninstall(cmd *cobra.Command, args []string) {
 	log.Printf("Operator Delete:")
 	operator.RunUninstall(cmd, args)
 	log.Printf("")
-	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	if cleanup {
 		log.Printf("CRD Delete:")
 		crd.RunDelete(cmd, args)
@@ -109,6 +159,11 @@ func RunStatus(cmd *cobra.Command, args []string) {
 	log.Printf("Operator Status:")
 	operator.RunStatus(cmd, args)
 	log.Printf("")
+	log.Printf("System Wait Ready:")
+	if system.WaitReady() {
+		log.Printf("")
+		log.Printf("")
+	}
 	log.Printf("System Status:")
 	system.RunStatus(cmd, args)
 
@@ -119,11 +174,25 @@ func RunStatus(cmd *cobra.Command, args []string) {
 	backingstore.RunList(cmd, args)
 	fmt.Println("")
 
+	fmt.Println("#--------------------#")
+	fmt.Println("#- Namespace Stores -#")
+	fmt.Println("#--------------------#")
+	fmt.Println("")
+	namespacestore.RunList(cmd, args)
+	fmt.Println("")
+
 	fmt.Println("#------------------#")
 	fmt.Println("#- Bucket Classes -#")
 	fmt.Println("#------------------#")
 	fmt.Println("")
 	bucketclass.RunList(cmd, args)
+	fmt.Println("")
+
+	fmt.Println("#-------------------#")
+	fmt.Println("#- NooBaa Accounts -#")
+	fmt.Println("#-------------------#")
+	fmt.Println("")
+	noobaaaccount.RunList(cmd, args)
 	fmt.Println("")
 
 	fmt.Println("#-----------------#")

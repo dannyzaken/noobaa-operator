@@ -7,9 +7,10 @@ import (
 	"github.com/asaskevich/govalidator"
 	semver "github.com/coreos/go-semver/semver"
 	dockerref "github.com/docker/distribution/reference"
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/pkg/validations"
 )
 
 // ReconcilePhaseVerifying runs the reconcile verify phase
@@ -104,7 +105,7 @@ func (r *Reconciler) CheckSystemCR() error {
 	// Set ActualImage to be updated in the noobaa status
 	r.NooBaa.Status.ActualImage = specImage
 
-	// Verfify the endpoints spec
+	// Verify the endpoints spec
 	endpointsSpec := r.NooBaa.Spec.Endpoints
 	if endpointsSpec != nil {
 		if endpointsSpec.MinCount <= 0 {
@@ -123,6 +124,21 @@ func (r *Reconciler) CheckSystemCR() error {
 				return util.NewPersistentError("InvalidEndpointsConfiguration",
 					fmt.Sprintf(`Invalid virtual host %s, not a fully qualified DNS name`, virtualHost))
 			}
+		}
+	}
+
+	err = CheckMongoURL(r.NooBaa)
+	if err != nil {
+		return util.NewPersistentError("InvalidMongoDbURL", fmt.Sprintf(`%s`, err))
+	}
+	// Validate the DefaultBackingStore Spec
+	if r.NooBaa.Spec.DefaultBackingStoreSpec != nil {
+		bs := nbv1.BackingStore{
+			Spec: *r.NooBaa.Spec.DefaultBackingStoreSpec,
+		}
+		err = validations.ValidateBackingStore(bs)
+		if err != nil {
+			return util.NewPersistentError("InvalidDefaultBackingStoreSpec", fmt.Sprintf(`%s`, err))
 		}
 	}
 

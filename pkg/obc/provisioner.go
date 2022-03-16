@@ -1,21 +1,29 @@
 package obc
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/nb"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/system"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bucketclass"
+	"github.com/noobaa/noobaa-operator/v5/pkg/nb"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/system"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 
 	"github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner"
 	obAPI "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api"
 	obErrors "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api/errors"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -84,6 +92,11 @@ func (p *Provisioner) Provision(bucketOptions *obAPI.BucketOptions) (*nbv1.Objec
 	log := p.Logger
 	log.Infof("Provision: got request to provision bucket %q", bucketOptions.BucketName)
 
+	err := ValidateOBC(bucketOptions.ObjectBucketClaim)
+	if err != nil {
+		return nil, err
+	}
+
 	r, err := NewBucketRequest(p, nil, bucketOptions)
 	if err != nil {
 		return nil, err
@@ -92,14 +105,14 @@ func (p *Provisioner) Provision(bucketOptions *obAPI.BucketOptions) (*nbv1.Objec
 	if r.SysClient.NooBaa.DeletionTimestamp != nil {
 		finalizersArray := r.SysClient.NooBaa.GetFinalizers()
 		if util.Contains(nbv1.GracefulFinalizer, finalizersArray) {
-			msg := fmt.Sprintf("NooBaa is in deleting state, new requests will be ignored")
+			msg := "NooBaa is in deleting state, new requests will be ignored"
 			log.Errorf(msg)
 			return nil, obErrors.NewBucketExistsError(msg)
 		}
 	}
 	// TODO: we need to better handle the case that a bucket was created, but Provision failed
 	// right now we will fail on create bucket when Provision is called the second time
-	err = r.CreateBucket()
+	err = r.CreateAndUpdateBucket(p, bucketOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +123,10 @@ func (p *Provisioner) Provision(bucketOptions *obAPI.BucketOptions) (*nbv1.Objec
 		return nil, err
 	}
 
+	err = r.putBucketTagging()
+	if err != nil {
+		logrus.Warnf("failed executing putBucketTagging on bucket: %v, %v", r.BucketName, err)
+	}
 	return r.OB, nil
 }
 
@@ -127,7 +144,7 @@ func (p *Provisioner) Grant(bucketOptions *obAPI.BucketOptions) (*nbv1.ObjectBuc
 	if r.SysClient.NooBaa.DeletionTimestamp != nil {
 		finalizersArray := r.SysClient.NooBaa.GetFinalizers()
 		if util.Contains(nbv1.GracefulFinalizer, finalizersArray) {
-			msg := fmt.Sprintf("NooBaa is in deleting state, new requests will be ignored")
+			msg := "NooBaa is in deleting state, new requests will be ignored"
 			log.Errorf(msg)
 			return nil, obErrors.NewBucketExistsError(msg)
 		}
@@ -154,13 +171,15 @@ func (p *Provisioner) Delete(ob *nbv1.ObjectBucket) error {
 
 	log.Infof("Delete: got request to delete bucket %q and account %q", r.BucketName, r.AccountName)
 
-	if ob.Spec.ReclaimPolicy != nil &&
-		(*ob.Spec.ReclaimPolicy == corev1.PersistentVolumeReclaimDelete ||
-			*ob.Spec.ReclaimPolicy == corev1.PersistentVolumeReclaimRecycle) {
-		err = r.DeleteBucket()
-		if err != nil {
-			return err
-		}
+	if ob.Spec.ReclaimPolicy != nil && *ob.Spec.ReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		// if reclaim policy is not delete, just warn and continue with deletion.
+		// we still want to delete because this could be part of resources cleanup after failed provisioning
+		log.Warnf("got delete request but reclaim policy is not Delete. assuming this is cleanup after error. ob.Spec.ReclaimPolicy=%q", *ob.Spec.ReclaimPolicy)
+	}
+
+	err = r.DeleteBucket()
+	if err != nil {
+		return err
 	}
 
 	err = r.DeleteAccount()
@@ -185,6 +204,32 @@ func (p *Provisioner) Revoke(ob *nbv1.ObjectBucket) error {
 
 	err = r.DeleteAccount()
 	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Update implements lib-bucket-provisioner callback to stop using an existing bucket additional config of OBC
+func (p *Provisioner) Update(ob *nbv1.ObjectBucket) error {
+	log := p.Logger
+	log.Infof("Update: got request to Update bucket %q", ob.Name)
+
+	err := ValidateOB(ob)
+	if err != nil {
+		return err
+	}
+
+	r, err := NewBucketRequest(p, ob, nil)
+	if err != nil {
+		return err
+	}
+
+	if err = r.updateReplicationPolicy(ob); err != nil {
+		return err
+	}
+
+	if err = r.UpdateBucket(); err != nil {
 		return err
 	}
 
@@ -259,6 +304,11 @@ func NewBucketRequest(
 			p.recorder.Event(r.OBC, "Warning", "BucketClassNotReady", msg)
 			return nil, fmt.Errorf(msg)
 		}
+		additionalConfig := r.OBC.Spec.AdditionalConfig
+		if additionalConfig == nil {
+			additionalConfig = map[string]string{}
+		}
+
 		r.OB = &nbv1.ObjectBucket{
 			Spec: nbv1.ObjectBucketSpec{
 				Connection: &nbv1.ObjectBucketConnection{
@@ -266,7 +316,7 @@ func NewBucketRequest(
 						BucketHost:           s3Hostname,
 						BucketPort:           s3Port,
 						BucketName:           r.BucketName,
-						AdditionalConfigData: map[string]string{},
+						AdditionalConfigData: additionalConfig,
 					},
 					AdditionalState: map[string]string{
 						"account":               r.AccountName, // needed for delete flow
@@ -282,13 +332,30 @@ func NewBucketRequest(
 		}
 		r.BucketName = ob.Spec.Connection.Endpoint.BucketName
 		r.AccountName = ob.Spec.AdditionalState["account"]
+		bucketClassName := ob.Spec.AdditionalState["bucketclass"]
+		r.BucketClass = &nbv1.BucketClass{
+			TypeMeta: metav1.TypeMeta{Kind: "BucketClass"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      bucketClassName,
+				Namespace: p.Namespace,
+			},
+		}
+		if !util.KubeCheck(r.BucketClass) {
+			p.Logger.Warnf("BucketClass %q not found in provisioner namespace %q", bucketClassName, p.Namespace)
+		}
+		if r.OB.Spec.Connection.Endpoint.AdditionalConfigData == nil {
+			r.OB.Spec.Connection.Endpoint.AdditionalConfigData = map[string]string{}
+		}
 	}
 
 	return r, nil
 }
 
-// CreateBucket creates the obc bucket
-func (r *BucketRequest) CreateBucket() error {
+// CreateAndUpdateBucket creates the obc bucket and update
+func (r *BucketRequest) CreateAndUpdateBucket(
+	p *Provisioner,
+	bucketOptions *obAPI.BucketOptions,
+) error {
 
 	log := r.Provisioner.Logger
 
@@ -306,44 +373,73 @@ func (r *BucketRequest) CreateBucket() error {
 		return fmt.Errorf("BucketClass not loaded %#v", r)
 	}
 
-	tierName := fmt.Sprintf("%s.%x", r.BucketName, time.Now().Unix())
-	tiers := []nb.TierItem{}
-
-	for i := range r.BucketClass.Spec.PlacementPolicy.Tiers {
-		tier := &r.BucketClass.Spec.PlacementPolicy.Tiers[i]
-		name := fmt.Sprintf("%s.%d", tierName, i)
-		tiers = append(tiers, nb.TierItem{Order: int64(i), Tier: name})
-		// we assume either mirror or spread but no mix and the bucket class controller rejects mixed classes.
-		placement := "SPREAD"
-		if tier.Placement == nbv1.TierPlacementMirror {
-			placement = "MIRROR"
-		}
-		err := r.SysClient.NBClient.CreateTierAPI(nb.CreateTierParams{
-			Name:          name,
-			AttachedPools: tier.BackingStores,
-			DataPlacement: placement,
-		})
-		if err != nil {
-			return fmt.Errorf("Failed to create tier %q with error: %v", name, err)
+	log.Infof("Provisioner: replication policy %s", r.BucketClass.Spec.ReplicationPolicy)
+	var replicationParams *nb.BucketReplicationParams
+	replicationPolicy := r.BucketClass.Spec.ReplicationPolicy
+	// if OBC has replication policy set it to replication policy instead of the bucketclass
+	if r.OBC.Spec.AdditionalConfig["replicationPolicy"] != "" {
+		replicationPolicy = r.OBC.Spec.AdditionalConfig["replicationPolicy"]
+	}
+	if replicationPolicy != "" {
+		if replicationParams, _, err = r.prepareReplicationParams(replicationPolicy, false); err != nil {
+			return err
 		}
 	}
 
-	err = r.SysClient.NBClient.CreateTieringPolicyAPI(nb.TieringPolicyInfo{
-		Name:  tierName,
-		Tiers: tiers,
-	})
-	if err != nil {
-		return fmt.Errorf("Failed to create tier %q with error: %v", tierName, err)
-	}
-
-	err = r.SysClient.NBClient.CreateBucketAPI(nb.CreateBucketParams{
-		Name:    r.BucketName,
-		Tiering: tierName,
+	createBucketParams := &nb.CreateBucketParams{
+		Name: r.BucketName,
 		BucketClaim: &nb.BucketClaimInfo{
 			BucketClass: r.BucketClass.Name,
 			Namespace:   r.OBC.Namespace,
 		},
-	})
+	}
+	if r.BucketClass.Spec.PlacementPolicy != nil {
+		if r.OBC.Spec.AdditionalConfig["path"] != "" {
+			return fmt.Errorf("Could not create OBC %q with inner path while missing namespace bucketclass", r.OBC.Name)
+		}
+
+		tierName, err := bucketclass.CreateTieringStructure(*r.BucketClass, r.BucketName, r.SysClient.NBClient)
+		if err != nil {
+			return fmt.Errorf("CreateTieringStructure for PlacementPolicy failed to create policy %q with error: %v", tierName, err)
+		}
+		createBucketParams.Tiering = tierName
+	}
+
+	// create NS bucket
+	if r.BucketClass.Spec.NamespacePolicy != nil {
+		namespacePolicyType := r.BucketClass.Spec.NamespacePolicy.Type
+		var readResources []nb.NamespaceResourceFullConfig
+		createBucketParams.Namespace = &nb.NamespaceBucketInfo{}
+
+		if namespacePolicyType == nbv1.NSBucketClassTypeSingle {
+			createBucketParams.Namespace.WriteResource = nb.NamespaceResourceFullConfig{
+				Resource: r.BucketClass.Spec.NamespacePolicy.Single.Resource,
+				Path:     r.OBC.Spec.AdditionalConfig["path"],
+			}
+			createBucketParams.Namespace.ReadResources = append(readResources, nb.NamespaceResourceFullConfig{
+				Resource: r.BucketClass.Spec.NamespacePolicy.Single.Resource})
+		} else if namespacePolicyType == nbv1.NSBucketClassTypeMulti {
+			createBucketParams.Namespace.WriteResource = nb.NamespaceResourceFullConfig{
+				Resource: r.BucketClass.Spec.NamespacePolicy.Multi.WriteResource,
+				Path:     r.OBC.Spec.AdditionalConfig["path"],
+			}
+			for i := range r.BucketClass.Spec.NamespacePolicy.Multi.ReadResources {
+				rr := r.BucketClass.Spec.NamespacePolicy.Multi.ReadResources[i]
+				readResources = append(readResources, nb.NamespaceResourceFullConfig{Resource: rr})
+			}
+			createBucketParams.Namespace.ReadResources = readResources
+		} else if namespacePolicyType == nbv1.NSBucketClassTypeCache {
+			createBucketParams.Namespace.WriteResource = nb.NamespaceResourceFullConfig{
+				Resource: r.BucketClass.Spec.NamespacePolicy.Cache.HubResource}
+			createBucketParams.Namespace.ReadResources = append(readResources, nb.NamespaceResourceFullConfig{
+				Resource: r.BucketClass.Spec.NamespacePolicy.Cache.HubResource})
+			createBucketParams.Namespace.Caching = &nb.CacheSpec{TTLMs: r.BucketClass.Spec.NamespacePolicy.Cache.Caching.TTL}
+			//cachePrefix := r.BucketClass.Spec.NamespacePolicy.Cache.Prefix
+		}
+	}
+
+	err = r.SysClient.NBClient.CreateBucketAPI(*createBucketParams)
+
 	if err != nil {
 		if nbErr, ok := err.(*nb.RPCError); ok {
 			if nbErr.RPCCode == "BUCKET_ALREADY_EXISTS" {
@@ -355,19 +451,146 @@ func (r *BucketRequest) CreateBucket() error {
 		return fmt.Errorf("Failed to create bucket %q with error: %v", r.BucketName, err)
 	}
 
+	log.Infof("PutBucketReplicationAPI params: %v", replicationParams)
+
+	// update replication policy
+	if replicationParams != nil {
+		err = r.SysClient.NBClient.PutBucketReplicationAPI(*replicationParams)
+		if err != nil {
+			return fmt.Errorf("Provisioner Failed to update replication on bucket %q with error: %v", r.BucketName, err)
+		}
+	}
+
 	log.Infof("✅ Successfully created bucket %q", r.BucketName)
+
+	return r.UpdateBucket()
+}
+
+//UpdateBucket update obc bucket
+func (r *BucketRequest) UpdateBucket() error {
+
+	log := r.Provisioner.Logger
+
+	if r.BucketClass == nil {
+		return r.LogAndGetError("BucketClass not loaded %#v", r)
+	}
+
+	bucket, err := r.SysClient.NBClient.ReadBucketAPI(nb.ReadBucketParams{Name: r.BucketName})
+	if err != nil {
+		return r.LogAndGetError("Bucket %q doesn't exist", r.BucketName)
+	}
+
+	quotaConfig, err := r.getQuotaConfig()
+	if err != nil {
+		return err
+	}
+	if quotaConfig.IsEqual(bucket.Quota) {
+		r.Provisioner.Logger.Infof("UpdateBucket: no changes in quota config")
+	} else {
+		createBucketParams := &nb.CreateBucketParams{
+			Name:  r.BucketName,
+			Quota: quotaConfig,
+		}
+
+		err = r.SysClient.NBClient.UpdateBucketAPI(*createBucketParams)
+		if err != nil {
+			return r.LogAndGetError("failed to update bucket %q with error: %v", r.BucketName, err)
+		}
+	}
+
+	log.Infof("✅ Successfully update bucket %q", r.BucketName)
 	return nil
+}
+
+// Get minimum QuotaConfig based on OBC config and BucketClass
+func (r *BucketRequest) getQuotaConfig() (*nb.QuotaConfig, error) {
+
+	var obMaxSize, obMaxObjects, bcMaxSize, bcMaxObjects string
+	var minMaxSize, minMaxObjects int64
+
+	// get quota config from ob
+	if r.OB.Spec.Endpoint.AdditionalConfigData != nil {
+		obMaxSize = r.OB.Spec.Endpoint.AdditionalConfigData["maxSize"]
+		obMaxObjects = r.OB.Spec.Endpoint.AdditionalConfigData["maxObjects"]
+	}
+	// get quota config from bucketclass
+	if r.BucketClass.Spec.Quota != nil {
+		bcMaxSize = r.BucketClass.Spec.Quota.MaxSize
+		bcMaxObjects = r.BucketClass.Spec.Quota.MaxObjects
+	}
+
+	r.Provisioner.Logger.Debugf("getQuotaConfig: bucket %q, obMaxSize %q, obMaxObjects %q, bcMaxSize %q, bcMaxObjects %q",
+		r.BucketName, obMaxSize, obMaxObjects, bcMaxSize, bcMaxObjects)
+
+	quota := nb.QuotaConfig{}
+	// In order to remove the bucket quota, returns empty quota config if bucketclass and ob have no quota config
+	if bcMaxSize == "" && bcMaxObjects == "" && obMaxSize == "" && obMaxObjects == "" {
+		return &quota, nil
+	}
+
+	//Parse bucketclass quota and transform to quotaConfig
+	if bcMaxSize != "" {
+		// Validator catchs parsing error
+		quantity, _ := resource.ParseQuantity(bcMaxSize)
+		minMaxSize = quantity.Value()
+	}
+	if bcMaxObjects != "" {
+		// Validator catchs parsing error
+		num, _ := strconv.ParseInt(bcMaxObjects, 10, 32)
+		minMaxObjects = num
+	}
+
+	//Parse obc quota transform to quotaConfig
+	if obMaxSize != "" {
+		// Validator catchs parsing error
+		quantity, _ := resource.ParseQuantity(obMaxSize)
+		obcMaxSizeInt := quantity.Value()
+		//Calculate min maxSize
+		if minMaxSize == 0 || obcMaxSizeInt < minMaxSize {
+			minMaxSize = obcMaxSizeInt
+		}
+	}
+
+	if obMaxObjects != "" {
+		// Validator catchs parsing error
+		obcMaxObjectsInt, _ := strconv.ParseInt(obMaxObjects, 10, 32)
+		//Calculate min maxObjects
+		if minMaxObjects == 0 || obcMaxObjectsInt < minMaxObjects {
+			minMaxObjects = obcMaxObjectsInt
+		}
+	}
+
+	if minMaxSize > 0 {
+		f, u := nb.GetBytesAndUnits(minMaxSize, 2)
+		quota.Size = &nb.SizeQuotaConfig{Value: f, Unit: u}
+	}
+	if minMaxObjects > 0 {
+		quota.Quantity = &nb.QuantityQuotaConfig{Value: int(minMaxObjects)}
+	}
+
+	return &quota, nil
+}
+
+//LogAndGetError error handler. prints error message to log and returns error
+func (r *BucketRequest) LogAndGetError(format string, a ...interface{}) error {
+	log := r.Provisioner.Logger
+	msg := fmt.Sprintf(format, a...)
+	log.Error(msg)
+	return fmt.Errorf(msg)
 }
 
 // CreateAccount creates the obc account
 func (r *BucketRequest) CreateAccount() error {
 
 	log := r.Provisioner.Logger
-	defaultPool := r.BucketClass.Spec.PlacementPolicy.Tiers[0].BackingStores[0]
+	var defaultResource string
+	if r.BucketClass.Spec.PlacementPolicy != nil {
+		defaultResource = r.BucketClass.Spec.PlacementPolicy.Tiers[0].BackingStores[0]
+	}
 	accountInfo, err := r.SysClient.NBClient.CreateAccountAPI(nb.CreateAccountParams{
 		Name:              r.AccountName,
 		Email:             r.AccountName,
-		DefaultPool:       defaultPool,
+		DefaultResource:   defaultResource,
 		HasLogin:          false,
 		S3Access:          true,
 		AllowBucketCreate: false,
@@ -430,10 +653,14 @@ func (r *BucketRequest) DeleteAccount() error {
 func (r *BucketRequest) DeleteBucket() error {
 
 	// TODO delete bucket data!!!
-
+	var err error
 	log := r.Provisioner.Logger
 	log.Infof("deleting bucket %q", r.BucketName)
-	err := r.SysClient.NBClient.DeleteBucketAndObjectsAPI(nb.DeleteBucketParams{Name: r.BucketName})
+	if r.BucketClass.Spec.NamespacePolicy != nil {
+		err = r.SysClient.NBClient.DeleteBucketAPI(nb.DeleteBucketParams{Name: r.BucketName})
+	} else {
+		err = r.SysClient.NBClient.DeleteBucketAndObjectsAPI(nb.DeleteBucketParams{Name: r.BucketName})
+	}
 
 	if err != nil {
 		if nbErr, ok := err.(*nb.RPCError); ok && nbErr.RPCCode == "NO_SUCH_BUCKET" {
@@ -445,5 +672,129 @@ func (r *BucketRequest) DeleteBucket() error {
 		log.Infof("✅ Successfully deleted bucket %q", r.BucketName)
 	}
 
+	return nil
+}
+
+// putBucketTagging calls s3 putBucketTagging on the created noobaa bucket
+func (r *BucketRequest) putBucketTagging() error {
+
+	client := &http.Client{Transport: util.InsecureHTTPTransport}
+	s3Status := &r.SysClient.NooBaa.Status.Services.ServiceS3
+	s3Config := &aws.Config{
+		Credentials: credentials.NewStaticCredentials(
+			r.SysClient.SecretAdmin.StringData["AWS_ACCESS_KEY_ID"],
+			r.SysClient.SecretAdmin.StringData["AWS_SECRET_ACCESS_KEY"],
+			"",
+		),
+		Region:           aws.String("us-east-1"),
+		Endpoint:         aws.String(s3Status.InternalDNS[0]),
+		S3ForcePathStyle: aws.Bool(true),
+		HTTPClient:       client,
+	}
+	s3Session, err := session.NewSession(s3Config)
+	if err != nil {
+		return err
+	}
+	s3Client := s3.New(s3Session)
+
+	// convert labels to tagging array
+	taggingArray := []*s3.Tag{}
+	for key, value := range r.OBC.Labels {
+		// no need to put tagging of these labels
+		if !util.Contains(key, []string{"app", "noobaa-domain", "bucket-provisioner"}) {
+			keyPointer := key
+			valuePointer := value
+			taggingArray = append(taggingArray, &s3.Tag{Key: &keyPointer, Value: &valuePointer})
+		}
+	}
+	logrus.Infof("put bucket tagging on bucket: %s tagging: %+v ", r.BucketName, taggingArray)
+	if len(taggingArray) == 0 {
+		return nil
+	}
+	_, err = s3Client.PutBucketTagging(&s3.PutBucketTaggingInput{
+		Bucket: &r.BucketName,
+		Tagging: &s3.Tagging{
+			TagSet: taggingArray,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// prepareReplicationParams validates and prepare the replication params
+func (r *BucketRequest) prepareReplicationParams(replicationPolicy string, update bool) (*nb.BucketReplicationParams, *nb.DeleteBucketReplicationParams, error) {
+	log := r.Provisioner.Logger
+	deleteReplicationParams := &nb.DeleteBucketReplicationParams{
+		Name: r.BucketName,
+	}
+
+	if replicationPolicy == "" && update {
+		return nil, deleteReplicationParams, nil
+	}
+
+	var replicationRules []interface{}
+	err := json.Unmarshal([]byte(replicationPolicy), &replicationRules)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to parse replication json %q: %v", replicationRules, err)
+	}
+	log.Infof("prepareReplicationParams: newReplication %+v", replicationRules)
+
+	if len(replicationRules) == 0 {
+		if update {
+			return nil, deleteReplicationParams, nil
+		}
+		return nil, nil, fmt.Errorf("replication rules array of bucket %q is empty %q", r.BucketName, replicationRules)
+	}
+
+	replicationParams := &nb.BucketReplicationParams{
+		Name:              r.BucketName,
+		ReplicationPolicy: replicationRules,
+	}
+
+	log.Infof("prepareReplicationParams: validating replication: replicationParams: %+v", replicationParams)
+	err = r.SysClient.NBClient.ValidateReplicationAPI(*replicationParams)
+	if err != nil {
+		rpcErr, isRPCErr := err.(*nb.RPCError)
+		if isRPCErr && rpcErr.RPCCode == "INVALID_REPLICATION_POLICY" {
+			return nil, nil, fmt.Errorf("Bucket replication configuration is invalid")
+		}
+		return nil, nil, fmt.Errorf("Provisioner Failed to validate replication of bucket %q with error: %v", r.BucketName, err)
+	}
+	log.Infof("prepareReplicationParams: validated replication successfully")
+	return replicationParams, nil, nil
+}
+
+// updateReplicationPolicy validates and prepare the replication params
+func (r *BucketRequest) updateReplicationPolicy(ob *nbv1.ObjectBucket) error {
+	log := r.Provisioner.Logger
+	newReplication := ob.Spec.Endpoint.AdditionalConfigData["replicationPolicy"]
+	log.Infof("updateReplicationPolicy: new Replication %q detected on ob: %v", newReplication, ob.Name)
+
+	updateReplicationParams, deleteReplicationParams, err := r.prepareReplicationParams(newReplication, true)
+	if err != nil {
+		return err
+	}
+
+	// delete bucket replication
+	if deleteReplicationParams != nil {
+		log.Infof("updateReplicationPolicy: deleting replication of bucket %q", ob.Name)
+		err = r.SysClient.NBClient.DeleteBucketReplicationAPI(*deleteReplicationParams)
+		if err != nil {
+			return fmt.Errorf("Provisioner Failed to remove replication of bucket %q with error: %v", ob.Name, err)
+		}
+		return nil
+	}
+
+	// update replication policy
+	if updateReplicationParams != nil {
+		log.Infof("updateReplicationPolicy: updating replication on ob: %q replicationParams: %+v", ob.Name, updateReplicationParams)
+		err = r.SysClient.NBClient.PutBucketReplicationAPI(*updateReplicationParams)
+		if err != nil {
+			return fmt.Errorf("Provisioner Failed to update replication on bucket %q with error: %v", ob.Name, err)
+		}
+	}
+	log.Infof("updateReplicationPolicy: updated replication successfully")
 	return nil
 }

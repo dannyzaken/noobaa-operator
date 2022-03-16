@@ -1,30 +1,56 @@
 package system
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"encoding/json"
+
+	"cloud.google.com/go/storage"
+	"google.golang.org/api/option"
+
 	"github.com/marstr/randname"
-	nbv1 "github.com/noobaa/noobaa-operator/v2/pkg/apis/noobaa/v1alpha1"
-	"github.com/noobaa/noobaa-operator/v2/pkg/nb"
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
+	"github.com/noobaa/noobaa-operator/v5/pkg/nb"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/sts"
 )
+
+const (
+	ibmEndpoint                      = "https://s3.direct.%s.cloud-object-storage.appdomain.cloud"
+	ibmLocation                      = "%s-standard"
+	ibmCOSCred                       = "ibm-cloud-cos-creds"
+	projectedServiceAccountTokenFile = "/var/run/secrets/openshift/serviceaccount/oidc-token"
+)
+
+type gcpAuthJSON struct {
+	ProjectID string `json:"project_id"`
+}
 
 // ReconcilePhaseConfiguring runs the reconcile phase
 func (r *Reconciler) ReconcilePhaseConfiguring() error {
@@ -68,7 +94,6 @@ func (r *Reconciler) ReconcilePhaseConfiguring() error {
 	if err := r.ReconcileDeploymentEndpointStatus(); err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -136,7 +161,7 @@ func (r *Reconciler) SetDesiredSecretOp() error {
 			res2, err := r.NBClient.CreateSystemAPI(nb.CreateSystemParams{
 				Name:     r.Request.Name,
 				Email:    r.SecretAdmin.StringData["email"],
-				Password: r.SecretAdmin.StringData["password"],
+				Password: nb.MaskedString(r.SecretAdmin.StringData["password"]),
 			})
 			if err != nil {
 				return fmt.Errorf("system creation failed, error: %v", err)
@@ -228,11 +253,15 @@ func (r *Reconciler) SetDesiredSecretEndpoints() error {
 func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 	r.DeploymentEndpoint.Spec.Selector.MatchLabels["noobaa-s3"] = r.Request.Name
 	r.DeploymentEndpoint.Spec.Template.Labels["noobaa-s3"] = r.Request.Name
+	r.DeploymentEndpoint.Spec.Template.Labels["app"] = r.Request.Name
 
 	endpointsSpec := r.NooBaa.Spec.Endpoints
 	podSpec := &r.DeploymentEndpoint.Spec.Template.Spec
 	if r.NooBaa.Spec.Tolerations != nil {
 		podSpec.Tolerations = r.NooBaa.Spec.Tolerations
+	}
+	if r.NooBaa.Spec.Affinity != nil {
+		podSpec.Affinity = r.NooBaa.Spec.Affinity
 	}
 	if r.NooBaa.Spec.ImagePullSecret == nil {
 		podSpec.ImagePullSecrets =
@@ -241,6 +270,11 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 		podSpec.ImagePullSecrets =
 			[]corev1.LocalObjectReference{*r.NooBaa.Spec.ImagePullSecret}
 	}
+	rootUIDGid := int64(0)
+	podSpec.SecurityContext.RunAsUser = &rootUIDGid
+	podSpec.SecurityContext.RunAsGroup = &rootUIDGid
+	podSpec.ServiceAccountName = "noobaa-endpoint"
+
 	for i := range podSpec.Containers {
 		c := &podSpec.Containers[i]
 		switch c.Name {
@@ -249,12 +283,13 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 			if endpointsSpec != nil && endpointsSpec.Resources != nil {
 				c.Resources = *endpointsSpec.Resources
 			}
-
 			mgmtBaseAddr := ""
 			s3BaseAddr := ""
+			util.MergeEnvArrays(&c.Env, &r.DefaultDeploymentEndpoint.Containers[0].Env)
 			if r.JoinSecret == nil {
 				mgmtBaseAddr = fmt.Sprintf(`wss://%s.%s.svc`, r.ServiceMgmt.Name, r.Request.Namespace)
 				s3BaseAddr = fmt.Sprintf(`wss://%s.%s.svc`, r.ServiceS3.Name, r.Request.Namespace)
+				r.setDesiredCoreEnv(c)
 			}
 
 			for j := range c.Env {
@@ -289,8 +324,7 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 					}
 				case "MONGODB_URL":
 					if r.JoinSecret == nil {
-						c.Env[j].Value = fmt.Sprintf(`mongodb://%s-0.%s/nbcore`,
-							r.NooBaaMongoDB.Name, r.NooBaaMongoDB.Spec.ServiceName)
+						c.Env[j].Value = r.MongoConnectionString
 					}
 				case "LOCAL_MD_SERVER":
 					if r.JoinSecret == nil {
@@ -311,6 +345,8 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 							},
 						}
 					}
+				case "NOOBAA_ROOT_SECRET":
+					c.Env[j].Value = r.SecretRootMasterKey
 				case "VIRTUAL_HOSTS":
 					hosts := []string{}
 					for _, addr := range r.NooBaa.Status.Services.ServiceS3.InternalDNS {
@@ -332,7 +368,7 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 					if endpointsSpec != nil {
 						hosts = append(hosts, endpointsSpec.AdditionalVirtualHosts...)
 					}
-					c.Env[j].Value = fmt.Sprintf(strings.Join(hosts[:], " "))
+					c.Env[j].Value = fmt.Sprint(strings.Join(hosts[:], " "))
 				case "ENDPOINT_GROUP_ID":
 					c.Env[j].Value = fmt.Sprint(r.NooBaa.UID)
 
@@ -342,20 +378,162 @@ func (r *Reconciler) SetDesiredDeploymentEndpoint() error {
 					} else {
 						c.Env[j].Value = ""
 					}
+
+				case "NODE_EXTRA_CA_CERTS":
+					c.Env[j].Value = r.ApplyCAsToPods
 				}
+			}
+
+			c.SecurityContext = &corev1.SecurityContext{
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{"SETUID", "SETGID"},
+				},
 			}
 
 			util.ReflectEnvVariable(&c.Env, "HTTP_PROXY")
 			util.ReflectEnvVariable(&c.Env, "HTTPS_PROXY")
 			util.ReflectEnvVariable(&c.Env, "NO_PROXY")
+
+			if r.DeploymentEndpoint.Spec.Template.Annotations == nil {
+				r.DeploymentEndpoint.Spec.Template.Annotations = make(map[string]string)
+			}
+
+			r.DeploymentEndpoint.Spec.Template.Annotations["noobaa.io/configmap-hash"] = r.CoreAppConfig.Annotations["noobaa.io/configmap-hash"]
+
+			return r.setDesiredEndpointMounts(podSpec, c)
 		}
 	}
 	return nil
 }
 
-// ReconcileHPAEndpoint reconcile the endpoint's HPS and report the configuration
+func (r *Reconciler) setDesiredEndpointMounts(podSpec *corev1.PodSpec, container *corev1.Container) error {
+
+	namespaceStoreList := &nbv1.NamespaceStoreList{}
+	if !util.KubeList(namespaceStoreList, client.InNamespace(options.Namespace)) {
+		return fmt.Errorf("Error: Cant list namespacestores")
+	}
+	podSpec.Volumes = r.DefaultDeploymentEndpoint.Volumes
+	container.VolumeMounts = r.DefaultDeploymentEndpoint.Containers[0].VolumeMounts
+
+	for _, nsStore := range namespaceStoreList.Items {
+		// Since namespacestore is able to get a rejected state on runtime errors,
+		// we want to skip namespacestores with invalid configuration only.
+		// Remove this validation when the kubernetes validations hooks will be available.
+		if !r.validateNsStoreNSFS(&nsStore) {
+			continue
+		}
+		if nsStore.Spec.NSFS != nil {
+			pvcName := nsStore.Spec.NSFS.PvcName
+			isPvcExist := false
+			volumeName := "nsfs-" + nsStore.Name
+			for _, volume := range podSpec.Volumes {
+				if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+					isPvcExist = true // PVC already attached to the pods - no need to add
+					volumeName = volume.Name
+					break
+				}
+			}
+			if !isPvcExist {
+				podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvcName,
+						},
+					},
+				})
+			}
+			subPath := nsStore.Spec.NSFS.SubPath
+			mountPath := "/nsfs/" + nsStore.Name
+			isMountExist := false
+			for _, volumeMount := range container.VolumeMounts {
+				if volumeMount.Name == volumeName && volumeMount.SubPath == subPath {
+					isMountExist = true // volumeMount already created - no need to add
+					break
+				}
+			}
+			if !isMountExist {
+				container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+					Name:      volumeName,
+					MountPath: mountPath,
+					SubPath:   subPath,
+				})
+			}
+		}
+	}
+	return nil
+}
+
+// Duplicate code from validation.go namespacetore pkg.
+// Cannot import the namespacestore pkg, because the pkg imports the system pkg
+// TODO remove the code
+func (r *Reconciler) validateNsStoreNSFS(nsStore *nbv1.NamespaceStore) bool {
+	nsfs := nsStore.Spec.NSFS
+
+	if nsfs == nil {
+		return true
+	}
+
+	//pvcName validation
+	if nsfs.PvcName == "" {
+		return false
+	}
+
+	//Check the mountPath
+	mountPath := "/nsfs/" + nsStore.Name
+	if len(mountPath) > 63 {
+		return false
+	}
+
+	//SubPath validation
+	if nsfs.SubPath != "" {
+		path := nsfs.SubPath
+		if len(path) > 0 && path[0] == '/' {
+			return false
+		}
+		parts := strings.Split(path, "/")
+		for _, item := range parts {
+			if item == ".." {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// awaitEndpointDeploymentPods wait for the the endpoint deployment to become ready
+// before creating the controlling HPA
+// See https://bugzilla.redhat.com/show_bug.cgi?id=1885524
+func (r *Reconciler) awaitEndpointDeploymentPods() error {
+
+	// Check that all deployment pods are available
+	availablePods := r.DeploymentEndpoint.Status.AvailableReplicas
+	desiredPods := r.DeploymentEndpoint.Status.Replicas
+	if availablePods == 0 || availablePods != desiredPods {
+		return errors.New("not enough available replicas in endpoint deployment")
+	}
+
+	// Check that deployment is ready
+	for _, condition := range r.DeploymentEndpoint.Status.Conditions {
+		if condition.Status != "True" {
+			return errors.New("endpoint deployment is not ready")
+		}
+	}
+
+	return nil
+}
+
+// ReconcileHPAEndpoint reconcile the endpoint's HPA and report the configuration
 // back to the noobaa core
 func (r *Reconciler) ReconcileHPAEndpoint() error {
+	// Wait for the the endpoint deployment to become ready
+	// only if HPA was not created yet
+	if r.HPAEndpoint.UID == "" {
+		if err := r.awaitEndpointDeploymentPods(); err != nil {
+			return err
+		}
+	}
+
 	if err := r.ReconcileObject(r.HPAEndpoint, r.SetDesiredHPAEndpoint); err != nil {
 		return err
 	}
@@ -426,20 +604,42 @@ func (r *Reconciler) ReconcileDefaultBackingStore() error {
 		log.Infof("Backing store %s already exists. skipping ReconcileCloudCredentials", r.DefaultBackingStore.Name)
 		return nil
 	}
+	if r.NooBaa.Spec.DefaultBackingStoreSpec != nil {
+		r.DefaultBackingStore.Spec = *r.NooBaa.Spec.DefaultBackingStoreSpec
+		if util.IsSTSClusterBS(r.DefaultBackingStore) {
+			if r.DefaultBackingStore.Spec.AWSS3.TargetBucket == "" {
+				log.Info("No TargetBucket for AWS STS type BackingStore creating one.")
+				r.DefaultBackingStore.Spec.AWSS3.TargetBucket = r.generateBackingStoreTargetName()
+				if err := r.prepareAWSSTSBackingStore(); err != nil {
+					return err
+				}
+			}
+		}
 
-	if r.CephObjectstoreUser.UID != "" {
-		log.Infof("CephObjectstoreUser %q created.  creating default backing store on ceph objectstore", r.CephObjectstoreUser.Name)
+		log.Infof("DefaultBacking store spec %s already exists. skipping ReconcileCloudCredentials", r.DefaultBackingStore.Name)
+	} else if r.CephObjectStoreUser.UID != "" {
+		log.Infof("CephObjectStoreUser %q created. Creating default backing store on ceph objectstore", r.CephObjectStoreUser.Name)
 		if err := r.prepareCephBackingStore(); err != nil {
 			return err
 		}
 	} else if r.AWSCloudCreds.UID != "" {
-		log.Infof("CredentialsRequest %q created.  creating default backing store on AWS objectstore", r.AWSCloudCreds.Name)
+		log.Infof("CredentialsRequest %q created. Creating default backing store on AWS objectstore", r.AWSCloudCreds.Name)
 		if err := r.prepareAWSBackingStore(); err != nil {
 			return err
 		}
 	} else if r.AzureCloudCreds.UID != "" {
-		log.Infof("CredentialsRequest %q created.  creating default backing store on Azure objectstore", r.AzureCloudCreds.Name)
+		log.Infof("CredentialsRequest %q created. Creating default backing store on Azure objectstore", r.AzureCloudCreds.Name)
 		if err := r.prepareAzureBackingStore(); err != nil {
+			return err
+		}
+	} else if r.GCPCloudCreds.UID != "" {
+		log.Infof("CredentialsRequest %q created.  creating default backing store on GCP objectstore", r.GCPCloudCreds.Name)
+		if err := r.prepareGCPBackingStore(); err != nil {
+			return err
+		}
+	} else if r.IBMCloudCOSCreds.UID != "" {
+		log.Infof("IBM objectstore credentials %q created. Creating default backing store on IBM objectstore", r.IBMCloudCOSCreds.Name)
+		if err := r.prepareIBMBackingStore(); err != nil {
 			return err
 		}
 	} else {
@@ -471,6 +671,16 @@ func (r *Reconciler) preparePVPoolBackingStore() error {
 		Requests: corev1.ResourceList{
 			corev1.ResourceStorage: *resource.NewQuantity(defaultPVSize, resource.BinarySI),
 		},
+	}
+	if r.NooBaa.Spec.PVPoolDefaultStorageClass != nil {
+		r.DefaultBackingStore.Spec.PVPool.StorageClass = *r.NooBaa.Spec.PVPoolDefaultStorageClass
+	} else {
+		storageClassName, err := r.findLocalStorageClass()
+		if err != nil {
+			r.Logger.Errorf("got error finding a default/local storage class. error: %v", err)
+			return err
+		}
+		r.DefaultBackingStore.Spec.PVPool.StorageClass = storageClassName
 	}
 	return nil
 }
@@ -523,6 +733,52 @@ func (r *Reconciler) prepareAWSBackingStore() error {
 	return nil
 }
 
+func (r *Reconciler) prepareAWSSTSBackingStore() error {
+	region, err := util.GetAWSRegion()
+	if err != nil {
+		r.Recorder.Eventf(r.NooBaa, corev1.EventTypeWarning, "DefaultBackingStoreFailure",
+			"Failed to get AWSRegion. using	 us-east-1 as the default region. %q", err)
+		region = "us-east-1"
+	}
+	r.Logger.Infof("identified aws region %s", region)
+	sess, err := session.NewSession(&aws.Config{
+		Region: &region,
+	})
+	if err != nil {
+		return err
+	}
+	bytes, err := ioutil.ReadFile(projectedServiceAccountTokenFile)
+	if err != nil {
+		r.Logger.Errorf("Failed to read file %q: %v", projectedServiceAccountTokenFile, err)
+		return err
+	}
+	webIdentitytoken := string(bytes)
+	svc := sts.New(sess)
+	webIdentityOutput, err := svc.AssumeRoleWithWebIdentity(&sts.AssumeRoleWithWebIdentityInput{
+		RoleArn:          r.DefaultBackingStore.Spec.AWSS3.AWSSTSRoleARN,
+		RoleSessionName:  &r.AWSSTSRoleSessionName,
+		WebIdentityToken: &webIdentitytoken,
+	})
+	if err != nil {
+		r.Logger.Errorf("Unable to assume role for ARN %q : %v", *r.NooBaa.Spec.DefaultBackingStoreSpec.AWSS3.AWSSTSRoleARN, err)
+		return err
+	}
+
+	s3Config := &aws.Config{
+		Credentials: credentials.NewStaticCredentials(
+			*webIdentityOutput.Credentials.AccessKeyId,
+			*webIdentityOutput.Credentials.SecretAccessKey,
+			*webIdentityOutput.Credentials.SessionToken,
+		),
+		Region: &region,
+	}
+	bucketName := r.DefaultBackingStore.Spec.AWSS3.TargetBucket
+	if err := r.createS3BucketForBackingStore(s3Config, bucketName); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (r *Reconciler) prepareAzureBackingStore() error {
 	// after we have cloud credential request, wait for credentials secret
 	cloudCredsSecret := &corev1.Secret{
@@ -571,8 +827,9 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 		r.AzureContainerCreds.StringData["AccountKey"] = key
 	}
 
+	azureContainerName := ""
 	if r.AzureContainerCreds.StringData["targetBlobContainer"] == "" {
-		var azureContainerName = strings.ToLower(randname.GenerateWithPrefix("noobaacontainer", 5))
+		azureContainerName = strings.ToLower(randname.GenerateWithPrefix("noobaacontainer", 5))
 		_, err := r.CreateContainer(r.AzureContainerCreds.StringData["AccountName"], azureGroupName, azureContainerName)
 		if err != nil {
 			return err
@@ -587,7 +844,7 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 	// create backing store
 	r.DefaultBackingStore.Spec.Type = nbv1.StoreTypeAzureBlob
 	r.DefaultBackingStore.Spec.AzureBlob = &nbv1.AzureBlobSpec{
-		TargetBlobContainer: r.AzureContainerCreds.StringData["targetBlobContainer"],
+		TargetBlobContainer: azureContainerName,
 		Secret: corev1.SecretReference{
 			Name:      r.AzureContainerCreds.Name,
 			Namespace: r.AzureContainerCreds.Namespace,
@@ -597,64 +854,233 @@ func (r *Reconciler) prepareAzureBackingStore() error {
 	return nil
 }
 
-func (r *Reconciler) prepareCephBackingStore() error {
+func (r *Reconciler) prepareGCPBackingStore() error {
 
-	secretName := "rook-ceph-object-user-" + r.CephObjectstoreUser.Spec.Store + "-" + r.CephObjectstoreUser.Name
+	cloudCredsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.GCPCloudCreds.Spec.SecretRef.Name,
+			Namespace: r.GCPCloudCreds.Spec.SecretRef.Namespace,
+		},
+	}
+
+	util.KubeCheck(cloudCredsSecret)
+	if cloudCredsSecret.UID == "" {
+		// TODO: we need to figure out why secret is not created, and react accordingly
+		// e.g. maybe we are running on AWS but our CredentialsRequest is for GCP
+		r.Logger.Infof("Secret %q was not created yet by cloud-credentials operator. retry on next reconcile..", r.GCPCloudCreds.Spec.SecretRef.Name)
+		return fmt.Errorf("cloud credentials secret %q is not ready yet", r.GCPCloudCreds.Spec.SecretRef.Name)
+	}
+	r.Logger.Infof("Secret %s was created successfully by cloud-credentials operator", r.GCPCloudCreds.Spec.SecretRef.Name)
+
+	util.KubeCheck(r.GCPBucketCreds)
+	if r.GCPBucketCreds.UID == "" {
+		r.GCPBucketCreds.StringData = cloudCredsSecret.StringData
+		r.Own(r.GCPBucketCreds)
+		if err := r.Client.Create(r.Ctx, r.GCPBucketCreds); err != nil {
+			return fmt.Errorf("got error on GCPBucketCreds creation. error: %v", err)
+		}
+	}
+	authJSON := &gcpAuthJSON{}
+	err := json.Unmarshal([]byte(cloudCredsSecret.StringData["service_account.json"]), authJSON)
+	if err != nil {
+		fmt.Println("Failed to parse secret", err)
+		return err
+	}
+	projectID := authJSON.ProjectID
+	r.GCPBucketCreds.StringData["GoogleServiceAccountPrivateKeyJson"] = cloudCredsSecret.StringData["service_account.json"]
+	ctx := context.Background()
+	gcpclient, err := storage.NewClient(ctx, option.WithCredentialsJSON([]byte(cloudCredsSecret.StringData["service_account.json"])))
+	if err != nil {
+		r.Logger.Info(err)
+		return err
+	}
+
+	var bucketName = strings.ToLower(randname.GenerateWithPrefix("noobaabucket", 5))
+	if err := r.createGCPBucketForBackingStore(gcpclient, projectID, bucketName); err != nil {
+		r.Logger.Info(err)
+		return err
+	}
+
+	if errUpdate := r.Client.Update(r.Ctx, r.GCPBucketCreds); errUpdate != nil {
+		return fmt.Errorf("got error on GCPBucketCreds update. error: %v", errUpdate)
+	}
+	// create backing store
+	r.DefaultBackingStore.Spec.Type = nbv1.StoreTypeGoogleCloudStorage
+	r.DefaultBackingStore.Spec.GoogleCloudStorage = &nbv1.GoogleCloudStorageSpec{
+		TargetBucket: bucketName,
+		Secret: corev1.SecretReference{
+			Name:      r.GCPBucketCreds.Name,
+			Namespace: r.GCPBucketCreds.Namespace,
+		},
+	}
+	return nil
+}
+
+func (r *Reconciler) prepareIBMBackingStore() error {
+	r.Logger.Info("Preparing backing store in IBM Cloud")
+
+	var (
+		endpoint string
+		location string
+	)
+
+	util.KubeCheck(r.IBMCloudCOSCreds)
+	if r.IBMCloudCOSCreds.UID == "" {
+		r.Logger.Errorf("Cloud credentials secret %q is not ready yet", r.IBMCloudCOSCreds.Name)
+		return fmt.Errorf("Cloud credentials secret %q is not ready yet", r.IBMCloudCOSCreds.Name)
+	}
+
+	if val, ok := r.IBMCloudCOSCreds.StringData["IBM_COS_Endpoint"]; ok {
+		// Use the endpoint provided in the secret
+		endpoint = val
+		r.Logger.Infof("Endpoint provided in secret: %q", endpoint)
+		if val, ok := r.IBMCloudCOSCreds.StringData["IBM_COS_Location"]; ok {
+			location = val
+			r.Logger.Infof("Location provided in secret: %q", location)
+		}
+	} else {
+		// Endpoint not provided in the secret, construct one based on the cluster's region
+		// https://cloud.ibm.com/docs/cloud-object-storage?topic=cloud-object-storage-endpoints#endpoints
+		region, err := util.GetIBMRegion()
+		if err != nil {
+			r.Logger.Errorf("Failed to get IBM Region. %q", err)
+			return fmt.Errorf("Failed to get IBM Region")
+		}
+		r.Logger.Infof("Constructing endpoint for region: %q", region)
+		// https://cloud.ibm.com/docs/cloud-object-storage?topic=cloud-object-storage-classes#classes-locationconstraint
+		endpoint = fmt.Sprintf(ibmEndpoint, region)
+		location = fmt.Sprintf(ibmLocation, region)
+	}
+
+	if _, err := url.Parse(endpoint); err != nil {
+		r.Logger.Errorf("Invalid formate URL %q", endpoint)
+		return fmt.Errorf("Invalid formate URL %q", endpoint)
+	}
+
+	r.Logger.Infof("IBM COS Endpoint: %s   LocationConstraint: %s", endpoint, location)
+
+	var accessKeyID string
+	if val, ok := r.IBMCloudCOSCreds.StringData["IBM_COS_ACCESS_KEY_ID"]; ok {
+		accessKeyID = val
+	} else {
+		r.Logger.Errorf("Missing IBM_COS_ACCESS_KEY_ID in the secret")
+		return fmt.Errorf("Missing IBM_COS_ACCESS_KEY_ID in the secret")
+	}
+
+	var secretAccessKey string
+	if val, ok := r.IBMCloudCOSCreds.StringData["IBM_COS_SECRET_ACCESS_KEY"]; ok {
+		secretAccessKey = val
+	} else {
+		r.Logger.Errorf("Missing IBM_COS_SECRET_ACCESS_KEY in the secret")
+		return fmt.Errorf("Missing IBM_COS_SECRET_ACCESS_KEY in the secret")
+	}
+
+	bucketName := r.generateBackingStoreTargetName()
+	r.Logger.Infof("IBM COS Bucket Name: %s", bucketName)
+
+	s3Config := &aws.Config{
+		S3ForcePathStyle: aws.Bool(true),
+		Endpoint:         aws.String(endpoint),
+		Credentials: credentials.NewStaticCredentials(
+			accessKeyID,
+			secretAccessKey,
+			"",
+		),
+		Region: &location,
+	}
+	if err := r.createS3BucketForBackingStore(s3Config, bucketName); err != nil {
+		return err
+	}
+	r.Logger.Infof("Created bucket: %s", bucketName)
+
+	// create backing store
+	r.DefaultBackingStore.Spec.Type = nbv1.StoreTypeIBMCos
+	r.DefaultBackingStore.Spec.IBMCos = &nbv1.IBMCosSpec{
+		TargetBucket: bucketName,
+		Secret: corev1.SecretReference{
+			Name:      r.IBMCloudCOSCreds.Name,
+			Namespace: r.IBMCloudCOSCreds.Namespace,
+		},
+		Endpoint:         endpoint,
+		SignatureVersion: nbv1.S3SignatureVersionV2,
+	}
+	return nil
+}
+
+func (r *Reconciler) createGCPBucketForBackingStore(client *storage.Client, projectID, bucketName string) error {
+	// [START create_bucket]
+	ctx := context.Background()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+	if err := client.Bucket(bucketName).Create(ctx, projectID, nil); err != nil {
+		return err
+	}
+	// [END create_bucket]
+	return nil
+}
+
+func (r *Reconciler) prepareCephBackingStore() error {
+	util.KubeCheck(r.CephObjectStoreUser)
+	if r.CephObjectStoreUser.UID == "" || r.CephObjectStoreUser.Status.Phase != "Ready" {
+		r.Logger.Infof("Ceph objectstore user %q is not ready. retry on next reconcile..", r.CephObjectStoreUser.Name)
+		return fmt.Errorf("Ceph objectstore user %q is not ready", r.CephObjectStoreUser.Name)
+	}
+
+	secretName := r.CephObjectStoreUser.Status.Info["secretName"]
+	if secretName == "" {
+		return util.NewPersistentError("InvalidCephObjectStoreUser",
+			"Ceph objectstore user is ready but a secret name was not provided")
+	}
 
 	// get access\secret keys from user secret
-	cephObjectUserSecret := &corev1.Secret{
+	cephObjectStoreUserSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: options.Namespace,
 		},
 	}
-
-	util.KubeCheck(cephObjectUserSecret)
-	if cephObjectUserSecret.UID == "" {
-		// TODO: we need to figure out why secret is not created, and react accordingly
-		// e.g. maybe we are running on azure but our CredentialsRequest is for AWS
-		r.Logger.Infof("Ceph object user secret %q was not created yet. retry on next reconcile..", secretName)
-		return fmt.Errorf("Ceph object user secret %q is not ready yet", secretName)
+	util.KubeCheck(cephObjectStoreUserSecret)
+	if cephObjectStoreUserSecret.UID == "" {
+		r.Logger.Infof("Ceph objectstore user secret %q was not created yet. retry on next reconcile..", secretName)
+		return fmt.Errorf("Ceph objectstore user secret %q is not ready yet", secretName)
 	}
 
-	endpoint := ""
-	if cephObjectUserSecret.StringData["Endpoint"] != "" {
-		// first look for the endpoint in the secret
-		endpoint = cephObjectUserSecret.StringData["Endpoint"]
-		r.Logger.Infof("Found RGW endpoint in cephObjectUserSecret %q",secretName)
-	} else if r.NooBaa.Labels != nil && r.NooBaa.Labels["rgw-endpoint"] != "" {
-		// take from label if not found so far
-		raw := r.NooBaa.Labels["rgw-endpoint"]
-		i := strings.LastIndex(raw, "_")
-		endpoint = fmt.Sprintf("http://%s:%s", raw[:i], raw[i+1:])
-		r.Logger.Info("Found RGW endpoint in noobaa label \"endpoint\"")
-	} else if r.CephObjectstoreUser.Spec.Store != "" {
-		// if not found in the secret compose from the ceph-object-store name
-		endpoint = "http://rook-ceph-rgw-" + r.CephObjectstoreUser.Spec.Store + "." + options.Namespace + ".svc.cluster.local:80"
-		r.Logger.Infof("Found RGW endpoint in CephObjectstoreUser %q",r.CephObjectstoreUser.Name)
-	}  else {
-		return fmt.Errorf("Ceph RGW endpoint address is not available")
-	}
-	r.Logger.Infof("RGW endpoint %q",endpoint)
+	endpoint := cephObjectStoreUserSecret.StringData["Endpoint"]
+	r.Logger.Infof("Will connect to RGW at %q", endpoint)
 
 	region := "us-east-1"
 	forcePathStyle := true
+	client := &http.Client{
+		Transport: util.InsecureHTTPTransport,
+		Timeout:   10 * time.Second,
+	}
+	if r.ApplyCAsToPods != "" {
+		client.Transport = util.SecureHTTPTransport
+	}
+
 	s3Config := &aws.Config{
 		Credentials: credentials.NewStaticCredentials(
-			cephObjectUserSecret.StringData["AccessKey"],
-			cephObjectUserSecret.StringData["SecretKey"],
+			cephObjectStoreUserSecret.StringData["AccessKey"],
+			cephObjectStoreUserSecret.StringData["SecretKey"],
 			"",
 		),
 		Endpoint:         &endpoint,
 		Region:           &region,
 		S3ForcePathStyle: &forcePathStyle,
+		HTTPClient:       client,
 	}
+
 	bucketName := r.generateBackingStoreTargetName()
 	if err := r.createS3BucketForBackingStore(s3Config, bucketName); err != nil {
 		return err
 	}
 
 	// create backing store
+	if r.DefaultBackingStore.ObjectMeta.Annotations == nil {
+		r.DefaultBackingStore.ObjectMeta.Annotations = map[string]string{}
+	}
+	r.DefaultBackingStore.ObjectMeta.Annotations["rgw"] = ""
 	r.DefaultBackingStore.Spec.Type = nbv1.StoreTypeS3Compatible
 	r.DefaultBackingStore.Spec.S3Compatible = &nbv1.S3CompatibleSpec{
 		Secret:           corev1.SecretReference{Name: secretName, Namespace: options.Namespace},
@@ -662,11 +1088,11 @@ func (r *Reconciler) prepareCephBackingStore() error {
 		Endpoint:         endpoint,
 		SignatureVersion: nbv1.S3SignatureVersionV4,
 	}
+
 	return nil
 }
 
 func (r *Reconciler) generateBackingStoreTargetName() string {
-	const MaxNameLength = 63
 	tsMilli := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
 	name := "nb." + tsMilli
 	if r.RouteMgmt.Spec.Host != "" {
@@ -705,7 +1131,7 @@ func (r *Reconciler) ReconcileDefaultBucketClass() error {
 		return nil
 	}
 
-	r.DefaultBucketClass.Spec.PlacementPolicy = nbv1.PlacementPolicy{
+	r.DefaultBucketClass.Spec.PlacementPolicy = &nbv1.PlacementPolicy{
 		Tiers: []nbv1.Tier{{
 			BackingStores: []nbv1.BackingStoreName{
 				r.DefaultBackingStore.Name,
@@ -780,12 +1206,35 @@ func (r *Reconciler) ReconcilePrometheusRule() error {
 	return r.ReconcileObjectOptional(r.PrometheusRule, nil)
 }
 
+// ApplyMonitoringLabels function adds the name of the resource that manages
+// noobaa, as a label on the noobaa metrics
+func (r *Reconciler) ApplyMonitoringLabels(serviceMonitor *monitoringv1.ServiceMonitor) {
+	if r.NooBaa.Spec.Labels != nil {
+		if monitoringLabels, ok := r.NooBaa.Spec.Labels["monitoring"]; ok {
+			if managedBy, ok := monitoringLabels["noobaa.io/managedBy"]; ok {
+				relabelConfig := monitoringv1.RelabelConfig{
+					TargetLabel: "managedBy",
+					Replacement: managedBy,
+				}
+				serviceMonitor.Spec.Endpoints[0].RelabelConfigs = append(
+					serviceMonitor.Spec.Endpoints[0].RelabelConfigs, &relabelConfig)
+			} else {
+				r.Logger.Info("noobaa.io/managedBy not specified in monitoring labels")
+			}
+		} else {
+			r.Logger.Info("monitoring labels not specified")
+		}
+	}
+}
+
 // ReconcileServiceMonitors reconciles service monitors
 func (r *Reconciler) ReconcileServiceMonitors() error {
 	// Skip if joining another NooBaa
 	if r.JoinSecret != nil {
 		return nil
 	}
+
+	r.ApplyMonitoringLabels(r.ServiceMonitorMgmt)
 
 	if err := r.ReconcileObjectOptional(r.ServiceMonitorMgmt, nil); err != nil {
 		return err
@@ -813,8 +1262,17 @@ func (r *Reconciler) ReconcileReadSystem() error {
 	r.Logger.Infof("updating noobaa-core version to %s", systemInfo.Version)
 	r.CoreVersion = systemInfo.Version
 
-	// update backingstores and bucketclass mode
+	// creates namespace stores if sync is needed on upgrade
+	if len(systemInfo.NamespaceResources) > 0 {
+		if err := r.ReconcileNamespaceStores(systemInfo.NamespaceResources); err != nil {
+			r.Logger.Infof("got error on ReconcileNamespaceStores, %+v", err)
+			return err
+		}
+	}
+
+	// update backingstores, namespacestores and bucketclass mode
 	r.UpdateBackingStoresPhase(systemInfo.Pools)
+	r.UpdateNamespaceStoresPhase(systemInfo.NamespaceResources)
 	r.UpdateBucketClassesPhase(systemInfo.Buckets)
 
 	return nil
@@ -836,7 +1294,35 @@ func (r *Reconciler) UpdateBackingStoresPhase(pools []nb.PoolInfo) {
 				bs.Status.Mode.ModeCode = pool.Mode
 				bs.Status.Mode.TimeStamp = fmt.Sprint(time.Now())
 				r.NooBaa.Status.ObservedGeneration = r.NooBaa.Generation
-				r.Client.Status().Update(r.Ctx, bs)
+				err := r.Client.Status().Update(r.Ctx, bs)
+				if err != nil {
+					logrus.Errorf("got error when trying to update status of backingstore %v. %v", bs.Name, err)
+				}
+			}
+		}
+	}
+}
+
+// UpdateNamespaceStoresPhase updates newPhase of namespace resource after readSystem
+func (r *Reconciler) UpdateNamespaceStoresPhase(namespaceResources []nb.NamespaceResourceInfo) {
+
+	nssList := &nbv1.NamespaceStoreList{
+		TypeMeta: metav1.TypeMeta{Kind: "NamespaceStoreList"},
+	}
+	if !util.KubeList(nssList, &client.ListOptions{Namespace: options.Namespace}) {
+		logrus.Errorf("not found: Namespace Store list")
+	}
+	for i := range nssList.Items {
+		nss := &nssList.Items[i]
+		for _, namespaceResource := range namespaceResources {
+			if namespaceResource.Name == nss.Name && nss.Status.Mode.ModeCode != namespaceResource.Mode {
+				nss.Status.Mode.ModeCode = namespaceResource.Mode
+				nss.Status.Mode.TimeStamp = fmt.Sprint(time.Now())
+				r.NooBaa.Status.ObservedGeneration = r.NooBaa.Generation
+				err := r.Client.Status().Update(r.Ctx, nss)
+				if err != nil {
+					logrus.Errorf("got error when trying to update status of namespacestore %v. %v", nss.Name, err)
+				}
 			}
 		}
 	}
@@ -855,6 +1341,11 @@ func (r *Reconciler) UpdateBucketClassesPhase(Buckets []nb.BucketInfo) {
 		bc := &bucketclassList.Items[i]
 		for _, bucket := range Buckets {
 
+			// in case of a namespace bucket, we might not have bucket.Tiering. skip
+			if bucket.Tiering == nil {
+				continue
+			}
+
 			bucketTieringPolicyName := ""
 			if bucket.BucketClaim != nil {
 				bucketTieringPolicyName = bucket.BucketClaim.BucketClass
@@ -862,7 +1353,10 @@ func (r *Reconciler) UpdateBucketClassesPhase(Buckets []nb.BucketInfo) {
 			if bc.Name == bucketTieringPolicyName && bucket.Tiering.Mode != bc.Status.Mode {
 				bc.Status.Mode = bucket.Tiering.Mode
 				r.NooBaa.Status.ObservedGeneration = r.NooBaa.Generation
-				r.Client.Status().Update(r.Ctx, bc)
+				err := r.Client.Status().Update(r.Ctx, bc)
+				if err != nil {
+					logrus.Errorf("got error when trying to update status of bucket class %v. %v ", bc.Name, err)
+				}
 
 			}
 		}
@@ -897,5 +1391,135 @@ func (r *Reconciler) ReconcileDeploymentEndpointStatus() error {
 		VirtualHosts: virtualHosts,
 	}
 
+	return nil
+}
+
+// ReconcileNamespaceStores syncs between core namespace resources with namespace bucketclasses
+func (r *Reconciler) ReconcileNamespaceStores(namespaceResources []nb.NamespaceResourceInfo) error {
+	r.Logger.Infof("ReconcileNamespaceStores: %+v", namespaceResources)
+
+	for _, nsr := range namespaceResources {
+		r.Logger.Infof("ReconcileNamespaceStores: nsr: %+v", nsr)
+		nsStore := &nbv1.NamespaceStore{
+			TypeMeta: metav1.TypeMeta{Kind: "NamespaceStore"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nsr.Name,
+				Namespace: options.Namespace,
+			},
+		}
+		if !util.KubeCheck(nsStore) {
+			namespaceResourceOperatorInfo, err := r.NBClient.ReadNamespaceResourceOperatorInfoAPI(nb.ReadNamespaceResourceParams{Name: nsr.Name})
+			if err != nil {
+				logrus.Warnf(`❌ Failed to read NamespaceStore secrets: %s`, err)
+				continue
+			}
+			if !namespaceResourceOperatorInfo.NeedK8sSync {
+				continue
+			}
+
+			o := util.KubeObject(bundle.File_deploy_internal_secret_empty_yaml)
+			secret := o.(*corev1.Secret)
+			secret.Namespace = options.Namespace
+			secret.Data = nil
+			secret.StringData = map[string]string{}
+
+			switch nsr.EndpointType {
+			case "AWS":
+				nsStore.Spec.Type = nbv1.NSStoreTypeAWSS3
+				secret.StringData["AWS_ACCESS_KEY_ID"] = nsr.Identity
+				secret.StringData["AWS_SECRET_ACCESS_KEY"] = namespaceResourceOperatorInfo.SecretKey
+				secret.Name = fmt.Sprintf("namespace-store-%s-%s", nbv1.NSStoreTypeAWSS3, nsr.Name)
+				nsStore.Spec.AWSS3 = &nbv1.AWSS3Spec{
+					TargetBucket: nsr.TargetBucket,
+					Secret: corev1.SecretReference{
+						Name:      secret.Name,
+						Namespace: secret.Namespace,
+					},
+				}
+			case "AZURE":
+				nsStore.Spec.Type = nbv1.NSStoreTypeAzureBlob
+				secret.StringData["AccountName"] = nsr.Identity
+				secret.StringData["AccountKey"] = namespaceResourceOperatorInfo.SecretKey
+				secret.Name = fmt.Sprintf("namespace-store-%s-%s", nbv1.NSStoreTypeAzureBlob, nsr.Name)
+				nsStore.Spec.AzureBlob = &nbv1.AzureBlobSpec{
+					TargetBlobContainer: nsr.TargetBucket,
+					Secret: corev1.SecretReference{
+						Name:      secret.Name,
+						Namespace: secret.Namespace,
+					},
+				}
+			case "S3_COMPATIBLE":
+				nsStore.Spec.Type = nbv1.NSStoreTypeS3Compatible
+				secret.Name = fmt.Sprintf("namespace-store-%s-%s", nbv1.NSStoreTypeS3Compatible, nsr.Name)
+				secret.StringData["AWS_ACCESS_KEY_ID"] = nsr.Identity
+				secret.StringData["AWS_SECRET_ACCESS_KEY"] = namespaceResourceOperatorInfo.SecretKey
+
+				var sig nbv1.S3SignatureVersion
+				if nsr.AuthMethod == nb.CloudAuthMethodAwsV4 {
+					sig = nbv1.S3SignatureVersionV4
+				}
+				if nsr.AuthMethod == nb.CloudAuthMethodAwsV2 {
+					sig = nbv1.S3SignatureVersionV2
+				}
+				nsStore.Spec.S3Compatible = &nbv1.S3CompatibleSpec{
+					TargetBucket: nsr.TargetBucket,
+					Endpoint:     nsr.Endpoint,
+					Secret: corev1.SecretReference{
+						Name:      secret.Name,
+						Namespace: secret.Namespace,
+					},
+					SignatureVersion: sig,
+				}
+			case "IBM_COS":
+				nsStore.Spec.Type = nbv1.NSStoreTypeIBMCos
+				secret.Name = fmt.Sprintf("namespace-store-%s-%s", nbv1.NSStoreTypeIBMCos, nsr.Name)
+				secret.StringData["AWS_ACCESS_KEY_ID"] = nsr.Identity
+				secret.StringData["AWS_SECRET_ACCESS_KEY"] = namespaceResourceOperatorInfo.SecretKey
+
+				var sig nbv1.S3SignatureVersion
+				if nsr.AuthMethod == nb.CloudAuthMethodAwsV4 {
+					sig = nbv1.S3SignatureVersionV4
+				}
+				if nsr.AuthMethod == nb.CloudAuthMethodAwsV2 {
+					sig = nbv1.S3SignatureVersionV2
+				}
+				nsStore.Spec.IBMCos = &nbv1.IBMCosSpec{
+					TargetBucket: nsr.TargetBucket,
+					Endpoint:     nsr.Endpoint,
+					Secret: corev1.SecretReference{
+						Name:      secret.Name,
+						Namespace: secret.Namespace,
+					},
+					SignatureVersion: sig,
+				}
+			default:
+				logrus.Errorf(`❌ Could not create NamespaceStore %q invalid endpoint type %q`, nsStore.Name, nsr.EndpointType)
+				continue
+			}
+
+			// Create namespace store CR
+			util.Panic(controllerutil.SetControllerReference(r.NooBaa, nsStore, scheme.Scheme))
+			if !util.KubeCreateFailExisting(nsStore) {
+				logrus.Errorf(`❌ Could not create NamespaceStore %q in Namespace %q (conflict)`, nsStore.Name, nsStore.Namespace)
+				continue
+			}
+
+			if !util.KubeCheck(secret) {
+				// Create secret
+				util.Panic(controllerutil.SetControllerReference(nsStore, secret, scheme.Scheme))
+				if !util.KubeCreateFailExisting(secret) {
+					logrus.Errorf(`❌ Could not create Secret %q in Namespace %q (conflict)`, secret.Name, secret.Namespace)
+					continue
+				}
+			}
+			err = r.NBClient.SetNamespaceStoreInfo(nb.NamespaceStoreInfo{
+				Name:      nsr.Name,
+				Namespace: options.Namespace,
+			})
+			if err != nil {
+				logrus.Infof("couldn't update namespace store info for namespace resource %q in namespace %q", nsr.Name, options.Namespace)
+			}
+		}
+	}
 	return nil
 }

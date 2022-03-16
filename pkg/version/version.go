@@ -1,9 +1,9 @@
 package version
 
 import (
-	"github.com/noobaa/noobaa-operator/v2/pkg/options"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
-	"github.com/noobaa/noobaa-operator/v2/version"
+	"github.com/noobaa/noobaa-operator/v5/pkg/options"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/version"
 
 	"github.com/spf13/cobra"
 )
@@ -14,6 +14,7 @@ func Cmd() *cobra.Command {
 		Use:   "version",
 		Short: "Show version",
 		Run:   RunVersion,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }

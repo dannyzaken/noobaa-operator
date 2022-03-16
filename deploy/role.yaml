@@ -91,6 +91,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ceph.rook.io
+  resources:
+  - cephclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - route.openshift.io
   resources:
   - routes
@@ -111,3 +119,23 @@ rules:
   - patch
   - list
   - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - security.openshift.io 
+  resourceNames:
+  - noobaa 
+  resources:
+  - securitycontextconstraints 
+  verbs: 
+  - use

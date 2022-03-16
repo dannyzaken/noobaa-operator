@@ -7,17 +7,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/noobaa/noobaa-operator/v2/pkg/bundle"
-	"github.com/noobaa/noobaa-operator/v2/pkg/util"
+	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
+	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	apiextv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/printers"
 )
 
 // CRD is just an alias for a long name
-type CRD = apiextv1beta1.CustomResourceDefinition
+type CRD = apiextv1.CustomResourceDefinition
 
 // Cmd returns a CLI command
 func Cmd() *cobra.Command {
@@ -41,6 +41,7 @@ func CmdCreate() *cobra.Command {
 		Use:   "create",
 		Short: "Create noobaa CRDs",
 		Run:   RunCreate,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -51,6 +52,7 @@ func CmdDelete() *cobra.Command {
 		Use:   "delete",
 		Short: "Delete noobaa CRDs",
 		Run:   RunDelete,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -61,6 +63,7 @@ func CmdStatus() *cobra.Command {
 		Use:   "status",
 		Short: "Status of noobaa CRDs",
 		Run:   RunStatus,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -71,6 +74,7 @@ func CmdWait() *cobra.Command {
 		Use:   "wait",
 		Short: "Wait for CRD to be ready",
 		Run:   RunWait,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -81,6 +85,7 @@ func CmdYaml() *cobra.Command {
 		Use:   "yaml",
 		Short: "Show bundled CRDs",
 		Run:   RunYaml,
+		Args:  cobra.NoArgs,
 	}
 	return cmd
 }
@@ -90,7 +95,9 @@ type Crds struct {
 	All               []*CRD
 	NooBaa            *CRD
 	BackingStore      *CRD
+	NamespaceStore    *CRD
 	BucketClass       *CRD
+	NooBaaAccount     *CRD
 	ObjectBucket      *CRD
 	ObjectBucketClaim *CRD
 }
@@ -126,20 +133,26 @@ func RunYaml(cmd *cobra.Command, args []string) {
 func LoadCrds() *Crds {
 	o1 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaas_crd_yaml)
 	o2 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_backingstores_crd_yaml)
-	o3 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_bucketclasses_crd_yaml)
-	o4 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbucketclaims_crd_yaml)
-	o5 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbuckets_crd_yaml)
+	o3 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_namespacestores_crd_yaml)
+	o4 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_bucketclasses_crd_yaml)
+	o5 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaaaccounts_crd_yaml)
+	o6 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbucketclaims_crd_yaml)
+	o7 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbuckets_crd_yaml)
 	crds := &Crds{
 		NooBaa:            o1.(*CRD),
 		BackingStore:      o2.(*CRD),
-		BucketClass:       o3.(*CRD),
-		ObjectBucketClaim: o4.(*CRD),
-		ObjectBucket:      o5.(*CRD),
+		NamespaceStore:    o3.(*CRD),
+		BucketClass:       o4.(*CRD),
+		NooBaaAccount:     o5.(*CRD),
+		ObjectBucketClaim: o6.(*CRD),
+		ObjectBucket:      o7.(*CRD),
 	}
 	crds.All = []*CRD{
 		crds.NooBaa,
 		crds.BackingStore,
+		crds.NamespaceStore,
 		crds.BucketClass,
+		crds.NooBaaAccount,
 		crds.ObjectBucketClaim,
 		crds.ObjectBucket,
 	}
@@ -169,9 +182,9 @@ func CheckCRD(crd *CRD) {
 	log := util.Logger()
 	desired := crd.DeepCopyObject().(*CRD)
 	util.KubeCheck(crd)
-	if crd.Spec.Version != desired.Spec.Version {
+	if crd.Spec.Versions[0].Name != desired.Spec.Versions[0].Name {
 		log.Printf("❌ CRD Version Mismatch: found %s desired %s",
-			crd.Spec.Version, desired.Spec.Version)
+			crd.Spec.Versions[0].Name, desired.Spec.Versions[0].Name)
 	}
 }
 
@@ -206,15 +219,15 @@ func WaitAllReady() {
 func IsReady(crd *CRD) (bool, error) {
 	for _, cond := range crd.Status.Conditions {
 		switch cond.Type {
-		case apiextv1beta1.NamesAccepted:
-			if cond.Status == apiextv1beta1.ConditionFalse {
+		case apiextv1.NamesAccepted:
+			if cond.Status == apiextv1.ConditionFalse {
 				return false, fmt.Errorf("CRD Name conflict: %v", cond.Reason)
 			}
-			if cond.Status != apiextv1beta1.ConditionTrue {
+			if cond.Status != apiextv1.ConditionTrue {
 				return false, nil
 			}
-		case apiextv1beta1.Established:
-			if cond.Status != apiextv1beta1.ConditionTrue {
+		case apiextv1.Established:
+			if cond.Status != apiextv1.ConditionTrue {
 				return false, nil
 			}
 		}

@@ -17,7 +17,10 @@ func (r *Reconciler) getStorageAccountsClient() storage.AccountsClient {
 	storageAccountsClient := storage.NewAccountsClient(r.AzureContainerCreds.StringData["azure_subscription_id"])
 	auth, _ := r.GetResourceManagementAuthorizer()
 	storageAccountsClient.Authorizer = auth
-	storageAccountsClient.AddToUserAgent("Go-http-client/1.1")
+	err := storageAccountsClient.AddToUserAgent("Go-http-client/1.1")
+	if err != nil {
+		log.Fatalf("got error on storageAccountsClient.AddToUserAgent %v", err)
+	}
 	return storageAccountsClient
 }
 
@@ -51,6 +54,7 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 			accountName, err, *result.Message)
 	}
 
+	enableHTTPSTrafficOnly := true
 	future, err := storageAccountsClient.Create(
 		r.Ctx,
 		accountGroupName,
@@ -60,7 +64,7 @@ func (r *Reconciler) CreateStorageAccount(accountName, accountGroupName string) 
 				Name: storage.StandardLRS},
 			Kind:                              storage.Storage,
 			Location:                          to.StringPtr(r.AzureContainerCreds.StringData["azure_region"]),
-			AccountPropertiesCreateParameters: &storage.AccountPropertiesCreateParameters{},
+			AccountPropertiesCreateParameters: &storage.AccountPropertiesCreateParameters{EnableHTTPSTrafficOnly: &enableHTTPSTrafficOnly},
 		})
 
 	if err != nil {
