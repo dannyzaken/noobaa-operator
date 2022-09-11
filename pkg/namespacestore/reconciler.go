@@ -446,6 +446,11 @@ func (r *Reconciler) ReadSystemInfo() error {
 
 	nsr := r.NamespaceResourceinfo
 
+	accessMode := nb.APIAccessModeReadWrite
+	if nsr.AccessMode == nbv1.AccessModeReadOnly {
+		accessMode = nb.APIAccessModeReadOnly
+	}
+
 	// handling namespace fs resource
 	if r.NamespaceStore.Spec.Type == nbv1.NSStoreTypeNSFS {
 		fsRootPath := "/nsfs/" + r.NamespaceStore.Name
@@ -459,6 +464,7 @@ func (r *Reconciler) ReadSystemInfo() error {
 				Name:      r.NamespaceStore.Name,
 				Namespace: options.Namespace,
 			},
+			AccessMode: &accessMode,
 		}
 		return nil
 	}
@@ -513,6 +519,7 @@ func (r *Reconciler) ReadSystemInfo() error {
 			Name:      r.NamespaceStore.Name,
 			Namespace: options.Namespace,
 		},
+		AccessMode: &accessMode,
 	}
 
 	return nil

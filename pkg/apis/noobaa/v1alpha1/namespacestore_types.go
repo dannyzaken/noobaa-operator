@@ -60,6 +60,10 @@ type NamespaceStoreSpec struct {
 	// Type is an enum of supported types
 	Type NSType `json:"type"`
 
+	//AccessMode is an enum of supported access modes
+	// +optional
+	AccessMode *AccessModeType `json:"accessMode,omitempty"`
+
 	// AWSS3Spec specifies a namespace store of type aws-s3
 	// +optional
 	AWSS3 *AWSS3Spec `json:"awsS3,omitempty"`
@@ -80,6 +84,15 @@ type NamespaceStoreSpec struct {
 	// +optional
 	NSFS *NSFSSpec `json:"nsfs,omitempty"`
 }
+
+type AccessModeType string
+
+const (
+	// AccessModeReadWrite is the default access mode
+	AccessModeReadWrite AccessModeType = "ReadWrite"
+	// AccessModeReadWrite is a read only access mode
+	AccessModeReadOnly AccessModeType = "ReadOnly"
+)
 
 // NamespaceStoreStatus defines the observed state of NamespaceStore
 // +k8s:openapi-gen=true
@@ -164,7 +177,7 @@ const (
 type NSFSSpec struct {
 	// PvcName is the name of the pvc in which the file system resides
 	PvcName string `json:"pvcName"`
-	
+
 	// SubPath is a path to a sub directory in the pvc file system
 	// +optional
 	SubPath string `json:"subPath"`

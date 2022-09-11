@@ -55,6 +55,10 @@ func CmdCreate() *cobra.Command {
 		CmdCreateAzureBlob(),
 		CmdCreateNSFS(),
 	)
+	cmd.Flags().String(
+		"access-mode", "read-write",
+		"The resource access privileges read-write|read-only",
+	)
 	return cmd
 }
 
@@ -250,7 +254,11 @@ func createCommon(cmd *cobra.Command, args []string, storeType nbv1.NSType, popu
 	}
 	name := args[0]
 	secretName, _ := cmd.Flags().GetString("secret-name")
-
+	cmdAccessMode, _ := cmd.Flags().GetString("access-mode")
+	accessMode := nbv1.AccessModeReadWrite
+	if cmdAccessMode == "read-only" {
+		accessMode = nbv1.AccessModeReadOnly
+	}
 	o := util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaa_cr_yaml)
 	sys := o.(*nbv1.NooBaa)
 	sys.Name = options.SystemName
@@ -260,7 +268,7 @@ func createCommon(cmd *cobra.Command, args []string, storeType nbv1.NSType, popu
 	namespaceStore := o.(*nbv1.NamespaceStore)
 	namespaceStore.Name = name
 	namespaceStore.Namespace = options.Namespace
-	namespaceStore.Spec = nbv1.NamespaceStoreSpec{Type: storeType}
+	namespaceStore.Spec = nbv1.NamespaceStoreSpec{Type: storeType, AccessMode: &accessMode}
 
 	o = util.KubeObject(bundle.File_deploy_internal_secret_empty_yaml)
 	secret := o.(*corev1.Secret)
