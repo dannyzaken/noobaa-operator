@@ -301,12 +301,9 @@ func (r *Reconciler) SetDesiredNooBaaDB() error {
 		},
 	)
 
-	for i := range podSpec.InitContainers {
-		c := &podSpec.InitContainers[i]
-		if c.Name == "initialize-database" {
-			c.Image = GetDesiredDBImage(r.NooBaa)
-		}
-	}
+	// remove init conatainer for DB
+	podSpec.InitContainers = nil
+
 	for i := range podSpec.Containers {
 		c := &podSpec.Containers[i]
 		if c.Name == "db" {
