@@ -1,3 +1,5 @@
+name: Build CNPG Image
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,14 +20,29 @@ jobs:
           ref: ${{ github.event.inputs.tag }}
           path: 'cloudnative-pg'
 
-      - name: Build CNPG Image
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Quay.io Registry
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.GHACTIONQUAYNAME }}
+          password: ${{ secrets.GHACTIONQUAYTOKEN }}
+
+      - name: Patch CNPG Repository
         run: |
           cd cloudnative-pg
           find . -name .git -a -type d -prune -o -type f -exec sed -i -e 's|postgresql.cnpg.io|postgresql.cnpg.noobaa.io|g' -e 's|postgresql-cnpg-io|postgresql-cnpg-noobaa-io|g' {} +
-          make CONTROLLER_IMG=quay.io/noobaa/cloudnative-pg-noobaa:${{ github.event.inputs.tag }} docker-build
 
-      - name: Login to Quay.io Registry
-        run: echo ${{ secrets.GHACTIONQUAYTOKEN }} | docker login quay.io -u ${{ secrets.GHACTIONQUAYNAME }} --password-stdin
+      - name: Bake and Build Image
+        uses: docker/bake-action@v4
+        with:
+          files: cloudnative-pg/docker-bake.hcl
+          targets: default
+          set: |
+            *.tags=quay.io/noobaa/cloudnative-pg-noobaa:${{ github.event.inputs.tag }}
+          workdir: cloudnative-pg
 
       - name: Push CNPG Image to Quay
         run: docker push quay.io/noobaa/cloudnative-pg-noobaa:${{ github.event.inputs.tag }}
