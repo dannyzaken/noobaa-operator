@@ -2,6 +2,7 @@ package namespacestore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -65,8 +66,9 @@ type Reconciler struct {
 	ExternalConnectionInfo *nb.ExternalConnectionInfo
 	NamespaceResourceinfo  *nb.NamespaceResourceInfo
 
-	AddExternalConnectionParams   *nb.AddExternalConnectionParams
-	CreateNamespaceResourceParams *nb.CreateNamespaceResourceParams
+	AddExternalConnectionParams    *nb.AddExternalConnectionParams
+	CreateNamespaceResourceParams  *nb.CreateNamespaceResourceParams
+	UpdateExternalConnectionParams *nb.UpdateExternalConnectionParams
 }
 
 // Own sets the object owner references to the namespacestore
@@ -343,7 +345,7 @@ func (r *Reconciler) ReconcileDeletion(systemFound bool) error {
 	}
 
 	if systemFound {
-		if err := r.ReadSystemInfo(); err != nil {
+		if err := r.ReadSystemInfo(); err != nil && !util.IsPersistentError(err) {
 			return err
 		}
 
@@ -360,15 +362,10 @@ func (r *Reconciler) ReconcileDeletion(systemFound bool) error {
 			for i := range r.SystemInfo.Accounts {
 				account := &r.SystemInfo.Accounts[i]
 				if account.DefaultResource == r.NamespaceResourceinfo.Name {
-					allowedBuckets := account.AllowedBuckets
-					if allowedBuckets.PermissionList == nil {
-						allowedBuckets.PermissionList = []string{}
-					}
 					err := r.NBClient.UpdateAccountS3Access(nb.UpdateAccountS3AccessParams{
 						Email:           account.Email,
 						S3Access:        account.HasS3Access,
 						DefaultResource: &internalPoolName,
-						AllowBuckets:    &allowedBuckets,
 					})
 					if err != nil {
 						return err
@@ -445,6 +442,11 @@ func (r *Reconciler) ReadSystemInfo() error {
 
 	nsr := r.NamespaceResourceinfo
 
+	accessMode := nb.APIAccessModeReadWrite
+	if r.NamespaceStore.Spec.AccessMode == nbv1.AccessModeReadOnly {
+		accessMode = nb.APIAccessModeReadOnly
+	}
+
 	// handling namespace fs resource
 	if r.NamespaceStore.Spec.Type == nbv1.NSStoreTypeNSFS {
 		fsRootPath := "/nsfs/" + r.NamespaceStore.Name
@@ -458,6 +460,7 @@ func (r *Reconciler) ReadSystemInfo() error {
 				Name:      r.NamespaceStore.Name,
 				Namespace: options.Namespace,
 			},
+			AccessMode: accessMode,
 		}
 		return nil
 	}
@@ -473,8 +476,15 @@ func (r *Reconciler) ReadSystemInfo() error {
 	if nsr != nil {
 		if nsr.EndpointType != conn.EndpointType ||
 			nsr.Endpoint != conn.Endpoint ||
-			nsr.Identity != conn.Identity {
+			nsr.Identity != string(conn.Identity) {
 			r.Logger.Warnf("using existing namespace resource but connection mismatch %+v namespace store %+v", conn, nsr)
+			r.UpdateExternalConnectionParams = &nb.UpdateExternalConnectionParams{
+				Name:               conn.Name,
+				Identity:           conn.Identity,
+				Secret:             conn.Secret,
+				AzureLogAccessKeys: conn.AzureLogAccessKeys,
+				Region:             conn.Region,
+			}
 		}
 	}
 
@@ -485,7 +495,7 @@ func (r *Reconciler) ReadSystemInfo() error {
 			c := &account.ExternalConnections.Connections[j]
 			if c.EndpointType == conn.EndpointType &&
 				c.Endpoint == conn.Endpoint &&
-				c.Identity == conn.Identity {
+				c.Identity == string(conn.Identity) {
 				r.ExternalConnectionInfo = c
 				conn.Name = c.Name
 			}
@@ -494,14 +504,20 @@ func (r *Reconciler) ReadSystemInfo() error {
 
 	r.AddExternalConnectionParams = conn
 
+	targetBucket, err := util.GetNamespaceStoreTargetBucket(r.NamespaceStore)
+	if err != nil {
+		return err
+	}
+
 	r.CreateNamespaceResourceParams = &nb.CreateNamespaceResourceParams{
 		Name:         r.NamespaceStore.Name,
 		Connection:   conn.Name,
-		TargetBucket: GetNamespaceStoreTargetBucket(r.NamespaceStore),
+		TargetBucket: targetBucket,
 		NamespaceStore: &nb.NamespaceStoreInfo{
 			Name:      r.NamespaceStore.Name,
 			Namespace: options.Namespace,
 		},
+		AccessMode: accessMode,
 	}
 
 	return nil
@@ -509,8 +525,49 @@ func (r *Reconciler) ReadSystemInfo() error {
 
 // LoadNamespaceStoreSecret loads the secret to the reconciler struct
 func (r *Reconciler) LoadNamespaceStoreSecret() error {
-	secretRef := GetNamespaceStoreSecret(r.NamespaceStore)
+	if util.IsSTSClusterNS(r.NamespaceStore) {
+		return nil
+	}
+	secretRef, err := util.GetNamespaceStoreSecret(r.NamespaceStore)
+	if err != nil {
+		return err
+	}
 	if secretRef != nil {
+		secret, err := util.GetSecretFromSecretReference(secretRef)
+		if err != nil {
+			return err
+		}
+
+		// check the existence of another secret in the system that contains the same credentials,
+		// if found, point this NS secret reference to it.
+		// so if the user will update the credentials, it will trigger updateExternalConnection in all the Namespacestores
+		if secret != nil {
+			suggestedSecret := util.CheckForIdenticalSecretsCreds(secret, string(nbv1.StoreType(r.NamespaceStore.Spec.Type)))
+			if suggestedSecret != nil {
+				secretRef.Name = suggestedSecret.Name
+				secretRef.Namespace = suggestedSecret.Namespace
+				err := util.SetNamespaceStoreSecretRef(r.NamespaceStore, secretRef)
+				if err != nil {
+					return err
+				}
+				if !util.KubeUpdate(r.NamespaceStore) {
+					return fmt.Errorf("failed to update NamespaceStore: %q secret reference", r.NamespaceStore.Name)
+				}
+				secret = suggestedSecret
+			}
+			if util.IsOwnedByNoobaa(secret.OwnerReferences) {
+				err = util.SetOwnerReference(r.NamespaceStore, secret, r.Scheme)
+				if _, isAlreadyOwnedErr := err.(*controllerutil.AlreadyOwnedError); !isAlreadyOwnedErr {
+					if err == nil {
+						if !util.KubeUpdate(secret) {
+							return fmt.Errorf("failed to update secret: %q owner reference", r.NamespaceStore.Name)
+						}
+					} else {
+						return err
+					}
+				}
+			}
+		}
 		r.Secret.Name = secretRef.Name
 		r.Secret.Namespace = secretRef.Namespace
 		if r.Secret.Namespace == "" {
@@ -522,7 +579,7 @@ func (r *Reconciler) LoadNamespaceStoreSecret() error {
 }
 
 // MakeExternalConnectionParams translates the namespace store spec and secret,
-// to noobaa api structures to be used for creating/updating external connetion and namespace store
+// to noobaa api structures to be used for creating/updating external connection and namespace store
 func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionParams, error) {
 
 	conn := &nb.AddExternalConnectionParams{
@@ -534,9 +591,14 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 	switch r.NamespaceStore.Spec.Type {
 
 	case nbv1.NSStoreTypeAWSS3:
-		conn.EndpointType = nb.EndpointTypeAws
-		conn.Identity = r.Secret.StringData["AWS_ACCESS_KEY_ID"]
-		conn.Secret = r.Secret.StringData["AWS_SECRET_ACCESS_KEY"]
+		if util.IsSTSClusterNS(r.NamespaceStore) {
+			conn.EndpointType = nb.EndpointTypeAwsSTS
+			conn.AWSSTSARN = *r.NamespaceStore.Spec.AWSS3.AWSSTSRoleARN
+		} else {
+			conn.EndpointType = nb.EndpointTypeAws
+			conn.Identity = nb.MaskedString(r.Secret.StringData["AWS_ACCESS_KEY_ID"])
+			conn.Secret = nb.MaskedString(r.Secret.StringData["AWS_SECRET_ACCESS_KEY"])
+		}
 		awsS3 := r.NamespaceStore.Spec.AWSS3
 		u := url.URL{
 			Scheme: "https",
@@ -547,13 +609,14 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 		}
 		if awsS3.Region != "" {
 			u.Host = fmt.Sprintf("s3.%s.amazonaws.com", awsS3.Region)
+			conn.Region = awsS3.Region
 		}
 		conn.Endpoint = u.String()
 
 	case nbv1.NSStoreTypeS3Compatible:
 		conn.EndpointType = nb.EndpointTypeS3Compat
-		conn.Identity = r.Secret.StringData["AWS_ACCESS_KEY_ID"]
-		conn.Secret = r.Secret.StringData["AWS_SECRET_ACCESS_KEY"]
+		conn.Identity = nb.MaskedString(r.Secret.StringData["AWS_ACCESS_KEY_ID"])
+		conn.Secret = nb.MaskedString(r.Secret.StringData["AWS_SECRET_ACCESS_KEY"])
 		s3Compatible := r.NamespaceStore.Spec.S3Compatible
 
 		//Configure auth method
@@ -564,8 +627,8 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 
 	case nbv1.NSStoreTypeIBMCos:
 		conn.EndpointType = nb.EndpointTypeIBMCos
-		conn.Identity = r.Secret.StringData["IBM_COS_ACCESS_KEY_ID"]
-		conn.Secret = r.Secret.StringData["IBM_COS_SECRET_ACCESS_KEY"]
+		conn.Identity = nb.MaskedString(r.Secret.StringData["IBM_COS_ACCESS_KEY_ID"])
+		conn.Secret = nb.MaskedString(r.Secret.StringData["IBM_COS_SECRET_ACCESS_KEY"])
 		IBMCos := r.NamespaceStore.Spec.IBMCos
 
 		//Configure auth method
@@ -577,17 +640,48 @@ func (r *Reconciler) MakeExternalConnectionParams() (*nb.AddExternalConnectionPa
 	case nbv1.NSStoreTypeAzureBlob:
 		conn.EndpointType = nb.EndpointTypeAzure
 		conn.Endpoint = "https://blob.core.windows.net"
-		conn.Identity = r.Secret.StringData["AccountName"]
-		conn.Secret = r.Secret.StringData["AccountKey"]
+		conn.Identity = nb.MaskedString(r.Secret.StringData["AccountName"])
+		conn.Secret = nb.MaskedString(r.Secret.StringData["AccountKey"])
+		tenantID := r.Secret.StringData["TenantID"]
+		appID := r.Secret.StringData["ApplicationID"]
+		appSecret := r.Secret.StringData["ApplicationSecret"]
+		logsAnalyticsWorkspaceID := r.Secret.StringData["LogsAnalyticsWorkspaceID"]
+
+		if tenantID != "" && appID != "" && appSecret != "" && logsAnalyticsWorkspaceID != "" {
+			conn.AzureLogAccessKeys = &nb.AzureLogAccessKeysParams{
+				AzureTenantID:                 tenantID,
+				AzureClientID:                 appID,
+				AzureClientSecret:             appSecret,
+				AzureLogsAnalyticsWorkspaceID: logsAnalyticsWorkspaceID,
+			}
+		}
+
+	case nbv1.NSStoreTypeGoogleCloudStorage:
+		conn.EndpointType = nb.EndpointTypeGoogle
+		conn.Endpoint = "https://www.googleapis.com"
+		privateKeyJSON := r.Secret.StringData["GoogleServiceAccountPrivateKeyJson"]
+		privateKey := &struct {
+			ID string `json:"private_key_id"`
+		}{}
+		err := json.Unmarshal([]byte(privateKeyJSON), privateKey)
+		if err != nil {
+			return nil, util.NewPersistentError("InvalidGoogleSecret", fmt.Sprintf(
+				"Invalid secret for google type %q expected JSON in data.GoogleServiceAccountPrivateKeyJson",
+				r.Secret.Name,
+			))
+		}
+		conn.Identity = nb.MaskedString(privateKey.ID)
+		conn.Secret = nb.MaskedString(privateKeyJSON)
 
 	default:
 		return nil, util.NewPersistentError("InvalidType",
 			fmt.Sprintf("Invalid namespace store type %q", r.NamespaceStore.Spec.Type))
 	}
-
-	if !util.IsStringGraphicOrSpacesCharsOnly(conn.Identity) || !util.IsStringGraphicOrSpacesCharsOnly(conn.Secret) {
-		return nil, util.NewPersistentError("InvalidSecret",
-			fmt.Sprintf("Invalid secret containing non graphic characters (perhaps not base64 encoded?) %q", r.Secret.Name))
+	if util.IsSTSClusterNS(r.NamespaceStore) {
+		if !util.IsStringGraphicOrSpacesCharsOnly(string(conn.Identity)) || !util.IsStringGraphicOrSpacesCharsOnly(string(conn.Secret)) {
+			return nil, util.NewPersistentError("InvalidSecret",
+				fmt.Sprintf("Invalid secret containing non graphic characters (perhaps not base64 encoded?) %q", r.Secret.Name))
+		}
 	}
 
 	return conn, nil
@@ -619,26 +713,60 @@ func (r *Reconciler) fixAlternateKeysNames() {
 
 // ReconcileExternalConnection handles the external connection using noobaa api
 func (r *Reconciler) ReconcileExternalConnection() error {
-	logrus.Infof("ReconcileExternalConnection")
 
-	// TODO we only support creation here, but not updates
 	if r.ExternalConnectionInfo != nil {
-		logrus.Infof("ReconcileExternalConnection1")
-		return nil
-	}
-	if r.AddExternalConnectionParams == nil {
-		logrus.Infof("ReconcileExternalConnection2")
 		return nil
 	}
 
-	res, err := r.NBClient.CheckExternalConnectionAPI(*r.AddExternalConnectionParams)
-	if err != nil {
-		logrus.Infof("ReconcileExternalConnection3 %+v", err)
-		if rpcErr, isRPCErr := err.(*nb.RPCError); isRPCErr {
-			if rpcErr.RPCCode == "INVALID_SCHEMA_PARAMS" {
-				return util.NewPersistentError("InvalidConnectionParams", rpcErr.Message)
-			}
+	if r.AddExternalConnectionParams == nil {
+		return nil
+	}
+
+	checkConnectionParams := &nb.CheckExternalConnectionParams{
+		Name:               r.AddExternalConnectionParams.Name,
+		EndpointType:       r.AddExternalConnectionParams.EndpointType,
+		Endpoint:           r.AddExternalConnectionParams.Endpoint,
+		Identity:           r.AddExternalConnectionParams.Identity,
+		Secret:             r.AddExternalConnectionParams.Secret,
+		AuthMethod:         r.AddExternalConnectionParams.AuthMethod,
+		AWSSTSARN:          r.AddExternalConnectionParams.AWSSTSARN,
+		AzureLogAccessKeys: r.AddExternalConnectionParams.AzureLogAccessKeys,
+		Region:             r.AddExternalConnectionParams.Region,
+	}
+
+	if r.UpdateExternalConnectionParams != nil {
+		checkConnectionParams.IgnoreNameAlreadyExist = true
+		err := r.CheckExternalConnection(checkConnectionParams)
+		if err != nil {
+			return err
 		}
+
+		err = r.NBClient.UpdateExternalConnectionAPI(*r.UpdateExternalConnectionParams)
+		if err != nil {
+			return err
+		}
+		r.UpdateExternalConnectionParams = nil
+		return nil
+	}
+
+	checkConnectionParams.IgnoreNameAlreadyExist = false
+	err := r.CheckExternalConnection(checkConnectionParams)
+	if err != nil {
+		return err
+	}
+
+	err = r.NBClient.AddExternalConnectionAPI(*r.AddExternalConnectionParams)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CheckExternalConnection checks an external connection using the noobaa api
+func (r *Reconciler) CheckExternalConnection(connInfo *nb.CheckExternalConnectionParams) error {
+	res, err := r.NBClient.CheckExternalConnectionAPI(*connInfo)
+	if err != nil {
 		return err
 	}
 
@@ -646,49 +774,33 @@ func (r *Reconciler) ReconcileExternalConnection() error {
 
 	case nb.ExternalConnectionSuccess:
 		// good
-		logrus.Infof("ReconcileExternalConnection4 ExternalConnectionSuccess")
 
 	case nb.ExternalConnectionInvalidCredentials:
-		logrus.Infof("ReconcileExternalConnection5 ExternalConnectionInvalidCredentials")
-
 		if time.Since(r.NamespaceStore.CreationTimestamp.Time) < 5*time.Minute {
 			r.Logger.Infof("got invalid credentials. sometimes access keys take time to propagate inside AWS. requeuing for 5 minutes")
 			return fmt.Errorf("Got InvalidCredentials. requeue again")
 		}
 		fallthrough
 	case nb.ExternalConnectionInvalidEndpoint:
-		logrus.Infof("ReconcileExternalConnection6 ExternalConnectionInvalidEndpoint")
 		if time.Since(r.NamespaceStore.CreationTimestamp.Time) < 5*time.Minute {
-			r.Logger.Infof("got invalid endopint. requeuing for 5 minutes to make sure it is not a temporary connection issue")
-			return fmt.Errorf("got invalid endopint. requeue again")
+			r.Logger.Infof("got invalid endpoint. requeuing for 5 minutes to make sure it is not a temporary connection issue")
+			return fmt.Errorf("got invalid endpoint. requeue again")
 		}
 		fallthrough
 	case nb.ExternalConnectionTimeSkew:
 		fallthrough
 	case nb.ExternalConnectionNotSupported:
-		logrus.Infof("ReconcileExternalConnection7 ExternalConnectionNotSupported")
 		return util.NewPersistentError(string(res.Status),
 			fmt.Sprintf("NamespaceStore %q invalid external connection %q", r.NamespaceStore.Name, res.Status))
-
 	case nb.ExternalConnectionTimeout:
 		fallthrough
 	case nb.ExternalConnectionUnknownFailure:
 		fallthrough
 	default:
-		logrus.Infof("ReconcileExternalConnection8 default")
-
 		return fmt.Errorf("CheckExternalConnection Status=%s Error=%s Message=%s",
 			res.Status, res.Error.Code, res.Error.Message)
 	}
 
-	logrus.Infof("ReconcileExternalConnection8 %+v", r.AddExternalConnectionParams)
-	err = r.NBClient.AddExternalConnectionAPI(*r.AddExternalConnectionParams)
-	if err != nil {
-		logrus.Infof("ReconcileExternalConnection9 %+v", err)
-		return err
-	}
-
-	logrus.Infof("ReconcileExternalConnection10")
 	return nil
 }
 
@@ -709,7 +821,7 @@ func (r *Reconciler) ReconcileNamespaceStore() error {
 	return nil
 }
 
-//getAuthMethod get auth method based on s3 signature
+// getAuthMethod get auth method based on s3 signature
 func getAuthMethod(signature nbv1.S3SignatureVersion, nsStoreName string) nb.CloudAuthMethod {
 
 	if signature == nbv1.S3SignatureVersionV4 {

@@ -19,16 +19,13 @@ groups: []
 priority: null
 readOnlyRootFilesystem: false
 requiredDropCapabilities:
-- KILL
-- MKNOD
+  - ALL
 runAsUser:
   type: RunAsAny
 seLinuxContext:
-  type: RunAsAny
+  type: MustRunAs
 supplementalGroups:
   type: RunAsAny
-users:
-- system:serviceaccount:openshift-storage:noobaa-endpoint
 volumes:
 - configMap
 - downwardAPI

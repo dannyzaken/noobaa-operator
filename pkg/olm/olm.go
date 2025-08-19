@@ -3,13 +3,14 @@ package olm
 import (
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
 
+	obAPI "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api"
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
 	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
+	"github.com/noobaa/noobaa-operator/v5/pkg/cnpg"
 	"github.com/noobaa/noobaa-operator/v5/pkg/crd"
 	"github.com/noobaa/noobaa-operator/v5/pkg/operator"
 	"github.com/noobaa/noobaa-operator/v5/pkg/options"
@@ -32,10 +33,22 @@ import (
 type unObj = map[string]interface{}
 type unArr = []interface{}
 
+const (
+	// OBCOwned is the value owned for the obc-crd flag
+	OBCOwned string = "owned"
+	// OBCRequired is the default value for the obc-crd flag
+	OBCRequired string = "required"
+	// OBCNone is the value none for the obc-crd flag
+	OBCNone string = "none"
+)
+
 type generateCSVParams struct {
-	IsForODF  bool
-	SkipRange string
-	Replaces  string
+	IsForODF      bool
+	OBCMode       string
+	SkipRange     string
+	Replaces      string
+	IncludeCnpg   bool
+	CnpgResources *cnpg.CnpgResources
 }
 
 // Cmd returns a CLI command
@@ -66,6 +79,8 @@ func CmdCatalog() *cobra.Command {
 	}
 	cmd.Flags().String("dir", "./build/_output/olm", "The output dir for the OLM package")
 	cmd.Flags().Bool("odf", false, "Build package according to ODF requirements")
+	cmd.Flags().Bool("include-cnpg", false, "Include cnpg resources in the package")
+	cmd.Flags().String("obc-crd", OBCRequired, "Determine if the OB/OBC CRDs are required, owned, or none")
 	cmd.Flags().String("csv-name", "", "File name for the CSV YAML")
 	cmd.Flags().String("skip-range", "", "set the olm.skipRange annotation in the CSV")
 	cmd.Flags().String("replaces", "", "set the replaces property in the CSV")
@@ -156,17 +171,31 @@ func RunCatalog(cmd *cobra.Command, args []string) {
 	var versionDir string
 
 	forODF, _ := cmd.Flags().GetBool("odf")
+	includeCnpg, _ := cmd.Flags().GetBool("include-cnpg")
+	obcMode, _ := cmd.Flags().GetString("obc-crd")
+	if obcMode != OBCOwned && obcMode != OBCRequired && obcMode != OBCNone {
+		log.Fatalf(`Invalid value for --obc-crd: %s. should be [%s|%s|%s]`, obcMode, OBCOwned, OBCRequired, OBCNone)
+	}
+
 	skipRange, _ := cmd.Flags().GetString("skip-range")
 	replaces, _ := cmd.Flags().GetString("replaces")
 	csvParams := &generateCSVParams{
-		IsForODF:  forODF,
-		SkipRange: skipRange,
-		Replaces:  replaces,
+		IsForODF:    forODF,
+		OBCMode:     obcMode,
+		SkipRange:   skipRange,
+		Replaces:    replaces,
+		IncludeCnpg: includeCnpg,
 	}
 	if forODF {
 		versionDir = dir
 	} else {
 		versionDir = dir + version.Version + "/"
+	}
+
+	if includeCnpg {
+		cnpgResources, err := cnpg.LoadCnpgResources()
+		util.Panic(err)
+		csvParams.CnpgResources = cnpgResources
 	}
 
 	pkgBytes, err := sigyaml.Marshal(unObj{
@@ -188,14 +217,32 @@ func RunCatalog(cmd *cobra.Command, args []string) {
 
 	util.Panic(os.MkdirAll(versionDir, 0755))
 	if !forODF {
-		util.Panic(ioutil.WriteFile(dir+"noobaa-operator.package.yaml", pkgBytes, 0644))
+		util.Panic(os.WriteFile(dir+"noobaa-operator.package.yaml", pkgBytes, 0644))
 	}
 	util.Panic(util.WriteYamlFile(csvFileName, GenerateCSV(opConf, csvParams)))
+	// The CA configmap is needed prior to the operator startup to prevent a certificate injection race condition
+	util.Panic(util.WriteYamlFile(
+		versionDir+"noobaa-operator.ca-bundle-configmap.yaml",
+		util.KubeObject(bundle.File_deploy_internal_configmap_ca_inject_yaml)))
 	crd.ForEachCRD(func(c *crd.CRD) {
-		if c.Spec.Group == nbv1.SchemeGroupVersion.Group {
+		if c.Spec.Group == nbv1.SchemeGroupVersion.Group || (csvParams.OBCMode == OBCOwned && c.Spec.Group == obAPI.Domain) {
 			util.Panic(util.WriteYamlFile(versionDir+c.Name+".crd.yaml", c))
 		}
 	})
+
+	// write cnpg resources to manifest dir
+	if csvParams.IncludeCnpg {
+		// write crds
+		for _, c := range csvParams.CnpgResources.CRDs {
+			util.Panic(util.WriteYamlFile(versionDir+c.Name+".crd.yaml", c))
+		}
+
+		// write configmap cnpg-default-monitoring
+		cm := csvParams.CnpgResources.ConfigMap
+		cm.Namespace = ""
+		util.Panic(util.WriteYamlFile(versionDir+cm.Name+".configmap.yaml", cm))
+	}
+
 }
 
 // RunCSV runs a CLI command
@@ -225,6 +272,10 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 	// this annotation hides the operator in OCP console
 	// csv.Annotations["createdAt"] = ???
 	csv.Annotations["alm-examples"] = string(almExamples)
+	csv.Annotations["operators.openshift.io/infrastructure-features"] = "ֿ'[\"disconnected\"]'"
+	// annotation for OpenShift AWS STS cluster
+	csv.Annotations["features.operators.openshift.io/token-auth-aws"] = "true"
+	csv.Annotations["capabilities"] = "Seamless Upgrades"
 	csv.Spec.Version.Version = semver.MustParse(version.Version)
 	csv.Spec.Description = bundle.File_deploy_olm_description_md
 	csv.Spec.Icon[0].Data = bundle.File_deploy_olm_noobaa_icon_base64
@@ -233,6 +284,11 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 		operv1.StrategyDeploymentPermissions{
 			ServiceAccountName: opConf.SA.Name,
 			Rules:              opConf.ClusterRole.Rules,
+		})
+	csv.Spec.InstallStrategy.StrategySpec.ClusterPermissions = append(csv.Spec.InstallStrategy.StrategySpec.ClusterPermissions,
+		operv1.StrategyDeploymentPermissions{
+			ServiceAccountName: opConf.SAUI.Name,
+			Rules:              opConf.RoleUI.Rules,
 		})
 	csv.Spec.InstallStrategy.StrategySpec.Permissions = []operv1.StrategyDeploymentPermissions{}
 	csv.Spec.InstallStrategy.StrategySpec.Permissions = append(csv.Spec.InstallStrategy.StrategySpec.Permissions,
@@ -247,8 +303,8 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 		})
 	csv.Spec.InstallStrategy.StrategySpec.Permissions = append(csv.Spec.InstallStrategy.StrategySpec.Permissions,
 		operv1.StrategyDeploymentPermissions{
-			ServiceAccountName: opConf.SAUI.Name,
-			Rules:              opConf.RoleUI.Rules,
+			ServiceAccountName: opConf.SACore.Name,
+			Rules:              opConf.RoleCore.Rules,
 		})
 	csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs = []operv1.StrategyDeploymentSpec{}
 	csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs = append(csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs,
@@ -259,7 +315,7 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 
 	if csvParams != nil {
 		if csvParams.IsForODF {
-			// add anotation to hide the operator in OCP console
+			// add annotations to hide the operator in OCP console
 			csv.Annotations["operators.operatorframework.io/operator-type"] = "non-standalone"
 
 			// add env vars for noobaa-core and noobaa-db images
@@ -272,6 +328,10 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 				corev1.EnvVar{
 					Name:  "NOOBAA_DB_IMAGE",
 					Value: options.DBImage,
+				},
+				corev1.EnvVar{
+					Name:  "NOOBAA_PSQL_12_IMAGE",
+					Value: options.Psql12Image,
 				},
 				corev1.EnvVar{
 					Name:  "ENABLE_NOOBAA_ADMISSION",
@@ -296,6 +356,20 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			csv.Annotations[operv1.SkipRangeAnnotationKey] = csvParams.SkipRange
 		}
 	}
+
+	csv.Spec.RelatedImages = []operv1.RelatedImage{}
+	csv.Spec.RelatedImages = append(csv.Spec.RelatedImages, operv1.RelatedImage{
+		Name:  "noobaa-core",
+		Image: options.NooBaaImage,
+	})
+	csv.Spec.RelatedImages = append(csv.Spec.RelatedImages, operv1.RelatedImage{
+		Name:  "noobaa-db",
+		Image: options.DBImage,
+	})
+	csv.Spec.RelatedImages = append(csv.Spec.RelatedImages, operv1.RelatedImage{
+		Name:  "noobaa-operator",
+		Image: options.OperatorImage,
+	})
 
 	csv.Spec.CustomResourceDefinitions.Owned = []operv1.CRDDescription{}
 	csv.Spec.CustomResourceDefinitions.Required = []operv1.CRDDescription{}
@@ -341,44 +415,44 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 	)
 
 	crdSpecDescriptors := map[string][]operv1.SpecDescriptor{
-		"NooBaa": []operv1.SpecDescriptor{
-			operv1.SpecDescriptor{
+		"NooBaa": {
+			{
 				Path:         "image",
 				XDescriptors: []string{uiText},
 				Description:  "DBImage (optional) overrides the default image for the db container.",
 				DisplayName:  "DB Image",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "dbImage",
 				XDescriptors: []string{uiText},
 				Description:  "Image (optional) overrides the default image for the server container.",
 				DisplayName:  "Image",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "coreResources",
 				XDescriptors: []string{uiResources},
 				Description:  "CoreResources (optional) overrides the default resource requirements for the server container.",
 				DisplayName:  "Core Resources",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "dbResources",
 				XDescriptors: []string{uiResources},
 				Description:  "DBResources (optional) overrides the default resource requirements for the db container.",
 				DisplayName:  "DB Resources",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "dbVolumeResources",
 				XDescriptors: []string{uiResources},
 				Description:  "DBVolumeResources (optional) overrides the default PVC resource requirements for the database volume. For the time being this field is immutable and can only be set on system creation. This is because volume size updates are only supported for increasing the size, and only if the storage class specifies `allowVolumeExpansion: true`, +immutable.",
 				DisplayName:  "Image",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "dbStorageClass",
 				XDescriptors: []string{uiText},
 				Description:  "DBStorageClass (optional) overrides the default cluster StorageClass for the database volume. For the time being this field is immutable and can only be set on system creation. This affects where the system stores its database which contains system config, buckets, objects meta-data and mapping file parts to storage locations. +immutable.",
 				DisplayName:  "DB StorageClass",
 			},
-			operv1.SpecDescriptor{
+			{
 				Path:         "pvPoolDefaultStorageClass",
 				XDescriptors: []string{uiText},
 				Description:  "PVPoolDefaultStorageClass (optional) overrides the default cluster StorageClass for the pv-pool volumes. This affects where the system stores data chunks (encrypted). Updates to this field will only affect new pv-pools, but updates to existing pools are not supported by the operator.",
@@ -386,129 +460,129 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			},
 			// this descriptor caused the OCP console to crash on noobaa CRD page, when trying to display tolerations.
 			// removing for now
-			// operv1.SpecDescriptor{
+			// {
 			// 	Path:         "tolerations",
 			// 	XDescriptors: []string{uiK8sTolerations},
 			// 	Description:  "Tolerations.",
 			// 	DisplayName:  "Tolerations",
 			// },
-			operv1.SpecDescriptor{
+			{
 				Path:         "imagePullSecret",
 				XDescriptors: []string{uiK8sSecret},
 				Description:  "ImagePullSecret (optional) sets a pull secret for the system image.",
 				DisplayName:  "Image Pull Secret",
 			},
 		},
-		"BackingStore": []operv1.SpecDescriptor{
-			operv1.SpecDescriptor{
+		"BackingStore": {
+			{
 				Description:  "Region is the AWS region.",
 				Path:         "awsS3.region",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
 				DisplayName:  "Region",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
 				Path:         "awsS3.secret.name",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SSLDisabled allows to disable SSL and use plain http.",
 				Path:         "awsS3.sslDisabled",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiBooleanSwitch},
 				DisplayName:  "SSL Disabled",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target S3 bucket.",
 				Path:         "awsS3.targetBucket",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
 				DisplayName:  "Target Bucket",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  " Secret refers to a secret that provides the credentials. The secret should define AccountName and AccountKey as provided\nby Azure Blob.",
 				Path:         "azureBlob.secret.name",
 				XDescriptors: []string{uiFieldGroupAzureBlob, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBlobContainer is the name of the target Azure Blob container.",
 				Path:         "azureBlob.targetBlobContainer",
 				XDescriptors: []string{uiFieldGroupAzureBlob, uiText},
 				DisplayName:  "Target Blob Container",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define GoogleServiceAccountPrivateKeyJson containing\nthe entire json string as provided by Google.",
 				Path:         "googleCloudStorage.secret.name",
 				XDescriptors: []string{uiFieldGroupGoogleCloudStorage, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target S3 bucket.",
 				Path:         "googleCloudStorage.targetBucket",
 				XDescriptors: []string{uiFieldGroupGoogleCloudStorage, uiText},
 				DisplayName:  "Target Bucket",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "NumVolumes is the number of volumes to allocate.",
 				Path:         "pvPool.numVolumes",
 				XDescriptors: []string{uiFieldGroupPvPool, uiNumber},
 				DisplayName:  "Num Volumes",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "VolumeResources represents the minimum resources each volume should have.",
 				Path:         "pvPool.resources",
 				XDescriptors: []string{uiFieldGroupPvPool, uiResources},
 				DisplayName:  "Resources",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "StorageClass is the name of the storage class to use for the PV's.",
 				Path:         "pvPool.storageClass",
 				XDescriptors: []string{uiFieldGroupPvPool, uiText},
 				DisplayName:  "Storage Class",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Endpoint is the S3 compatible endpoint: http(s)://host:port.",
 				Path:         "s3Compatible.endpoint",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
 				DisplayName:  "End Point",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
 				Path:         "s3Compatible.secret.name",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
 				Path:         "s3Compatible.signatureVersion",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiNumber},
 				DisplayName:  "Signature Version",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target S3 bucket.",
 				Path:         "s3Compatible.targetBucket",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
 				DisplayName:  "Target Bucket",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Endpoint is the IBM COS endpoint: http(s)://host:port.",
 				Path:         "IBMCos.endpoint",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
 				DisplayName:  "End Point",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define IBM_COS_ACCESS_KEY_ID and IBM_COS_SECRET_ACCESS_KEY.",
 				Path:         "IBMCos.secret.name",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
 				Path:         "IBMCos.signatureVersion",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiNumber},
 				DisplayName:  "Signature Version",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target IBM COS bucket.",
 				Path:         "IBMCos.targetBucket",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
@@ -516,86 +590,86 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			},
 		},
 
-		"NamespaceStore": []operv1.SpecDescriptor{
-			operv1.SpecDescriptor{
+		"NamespaceStore": {
+			{
 				Description:  "Region is the AWS region.",
 				Path:         "awsS3.region",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
 				DisplayName:  "Region",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
 				Path:         "awsS3.secret.name",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SSLDisabled allows to disable SSL and use plain http.",
 				Path:         "awsS3.sslDisabled",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiBooleanSwitch},
 				DisplayName:  "SSL Disabled",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target S3 bucket.",
 				Path:         "awsS3.targetBucket",
 				XDescriptors: []string{uiFieldGroupAwsS3, uiText},
 				DisplayName:  "Target Bucket",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  " Secret refers to a secret that provides the credentials. The secret should define AccountName and AccountKey as provided\nby Azure Blob.",
 				Path:         "azureBlob.secret.name",
 				XDescriptors: []string{uiFieldGroupAzureBlob, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBlobContainer is the name of the target Azure Blob container.",
 				Path:         "azureBlob.targetBlobContainer",
 				XDescriptors: []string{uiFieldGroupAzureBlob, uiText},
 				DisplayName:  "Target Blob Container",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Endpoint is the S3 compatible endpoint: http(s)://host:port.",
 				Path:         "s3Compatible.endpoint",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
 				DisplayName:  "End Point",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
 				Path:         "s3Compatible.secret.name",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
 				Path:         "s3Compatible.signatureVersion",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiNumber},
 				DisplayName:  "Signature Version",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target S3 bucket.",
 				Path:         "s3Compatible.targetBucket",
 				XDescriptors: []string{uiFieldGroupS3Compatible, uiText},
 				DisplayName:  "Target Bucket",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Endpoint is the IBM COS endpoint: http(s)://host:port.",
 				Path:         "IBMCos.endpoint",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
 				DisplayName:  "End Point",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Secret refers to a secret that provides the credentials. The secret should define IBM_COS_ACCESS_KEY_ID and IBM_COS_SECRET_ACCESS_KEY.",
 				Path:         "IBMCos.secret.name",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiK8sSecret},
 				DisplayName:  "Secret",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "SignatureVersion specifies the client signature version to use when signing requests.",
 				Path:         "IBMCos.signatureVersion",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiNumber},
 				DisplayName:  "Signature Version",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "TargetBucket is the name of the target IBM COS bucket.",
 				Path:         "IBMCos.targetBucket",
 				XDescriptors: []string{uiFieldGroupIBMCos, uiText},
@@ -603,44 +677,44 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			},
 		},
 
-		"BucketClass": []operv1.SpecDescriptor{
-			operv1.SpecDescriptor{
+		"BucketClass": {
+			{
 				Description:  "BackingStores is an unordered list of backing store names. The meaning of the list depends on the placement.",
 				Path:         "placementPolicy.tiers[0].backingStores[0]",
 				XDescriptors: []string{uiFieldGroupPlacementPolicy, uiText},
 				DisplayName:  "Backing Stores",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Placement specifies the type of placement for the tier If empty it should have a single backing store.",
 				Path:         "placementPolicy.tiers[0].placement",
 				XDescriptors: []string{uiFieldGroupPlacementPolicy, uiText},
 				DisplayName:  "Placement",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Namespace Policy type specifies the type of the namespace policy configuration.",
 				Path:         "namespacePolicy.type",
 				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
 				DisplayName:  "Namespace Policy",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Resource specifies the namespace store configured by the bucket class to be read and write targets.",
 				Path:         "namespacePolicy.single.resource",
 				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
 				DisplayName:  "Resource",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Read Resources specifies the namespace stores configured by the bucket class to be read targets.",
 				Path:         "namespacePolicy.Multi.readResources",
 				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
 				DisplayName:  "Read Resources",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Write Resource specifies the namespace store configured by the bucket class to be write target.",
 				Path:         "namespacePolicy.Multi.writeResource",
 				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
 				DisplayName:  "Write Resource",
 			},
-			operv1.SpecDescriptor{
+			{
 				Description:  "Hub Resource specifies the target namespace store configured by the bucket class to be read and write targets.",
 				Path:         "namespacePolicy.Cache.hubResource",
 				XDescriptors: []string{uiFieldGroupNamespacePolicy, uiText},
@@ -648,8 +722,8 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			},
 		},
 
-		"ObjectBucketClaim": []operv1.SpecDescriptor{},
-		"ObjectBucket":      []operv1.SpecDescriptor{},
+		"ObjectBucketClaim": {},
+		"ObjectBucket":      {},
 	}
 
 	crd.ForEachCRD(func(c *crd.CRD) {
@@ -661,15 +735,23 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 			Description:     crdDescriptions[c.Spec.Names.Kind],
 			SpecDescriptors: crdSpecDescriptors[c.Spec.Names.Kind],
 			Resources: []operv1.APIResourceReference{
-				operv1.APIResourceReference{Name: "services", Kind: "Service", Version: "v1"},
-				operv1.APIResourceReference{Name: "secrets", Kind: "Secret", Version: "v1"},
-				operv1.APIResourceReference{Name: "configmaps", Kind: "ConfigMap", Version: "v1"},
-				operv1.APIResourceReference{Name: "statefulsets.apps", Kind: "StatefulSet", Version: "v1"},
+				{Name: "services", Kind: "Service", Version: "v1"},
+				{Name: "secrets", Kind: "Secret", Version: "v1"},
+				{Name: "configmaps", Kind: "ConfigMap", Version: "v1"},
+				{Name: "statefulsets.apps", Kind: "StatefulSet", Version: "v1"},
 			},
 		}
-		if c.Spec.Group == nbv1.SchemeGroupVersion.Group {
+
+		switch c.Spec.Group {
+		case nbv1.SchemeGroupVersion.Group:
 			csv.Spec.CustomResourceDefinitions.Owned = append(csv.Spec.CustomResourceDefinitions.Owned, crdDesc)
-		} else {
+		case obAPI.Domain:
+			if csvParams != nil && csvParams.OBCMode == OBCOwned {
+				csv.Spec.CustomResourceDefinitions.Owned = append(csv.Spec.CustomResourceDefinitions.Owned, crdDesc)
+			} else if csvParams == nil || csvParams.OBCMode == OBCRequired {
+				csv.Spec.CustomResourceDefinitions.Required = append(csv.Spec.CustomResourceDefinitions.Required, crdDesc)
+			} // else OBCMode == OBCNone, do nothing
+		default:
 			csv.Spec.CustomResourceDefinitions.Required = append(csv.Spec.CustomResourceDefinitions.Required, crdDesc)
 		}
 	})
@@ -695,7 +777,135 @@ func GenerateCSV(opConf *operator.Conf, csvParams *generateCSVParams) *operv1.Cl
 		WebhookPath:    vaw.ClientConfig.Service.Path,
 	}
 	csv.Spec.WebhookDefinitions = append(csv.Spec.WebhookDefinitions, webhookDefinition)
+
+	if csvParams.IncludeCnpg {
+		addCnpgToCSV(csv, csvParams)
+	}
 	return csv
+}
+
+func addCnpgToCSV(csv *operv1.ClusterServiceVersion, csvParams *generateCSVParams) {
+
+	// get cnpg resources
+	resources := csvParams.CnpgResources
+
+	trueVal := true
+	falseVal := false
+
+	// Perform modifications to the cnpg operator deployment for OLM deployments
+	// following this changes yaml: https://github.com/cloudnative-pg/cloudnative-pg/blob/main/config/olm-default/olm_changes.yaml
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.SecurityContext.RunAsUser = nil
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.SecurityContext.RunAsGroup = nil
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.SecurityContext.SeccompProfile = nil
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.SecurityContext.RunAsNonRoot = &trueVal
+
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].SecurityContext.RunAsUser = nil
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].SecurityContext.RunAsGroup = nil
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = &falseVal
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem = &trueVal
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{
+		Drop: []corev1.Capability{"ALL"},
+	}
+	resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].Env = append(resources.CnpgOperatorDeployment.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "WEBHOOK_CERT_DIR",
+		Value: "/apiserver.local.config/certificates",
+	})
+
+	if csvParams.IsForODF {
+		// add tolerations to the cnpg operator deployment
+		resources.CnpgOperatorDeployment.Spec.Template.Spec.Tolerations = []corev1.Toleration{
+			{
+				Key:      "node.ocs.openshift.io/storage",
+				Effect:   corev1.TaintEffectNoSchedule,
+				Operator: corev1.TolerationOpEqual,
+				Value:    "true",
+			},
+		}
+	}
+
+	// add cnpg deployment and rules to InstallStrategy
+	csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs = append(csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs,
+		operv1.StrategyDeploymentSpec{
+			Name:  resources.CnpgOperatorDeployment.Name,
+			Spec:  resources.CnpgOperatorDeployment.Spec,
+			Label: resources.CnpgOperatorDeployment.Labels,
+		})
+	csv.Spec.InstallStrategy.StrategySpec.ClusterPermissions = append(csv.Spec.InstallStrategy.StrategySpec.ClusterPermissions,
+		operv1.StrategyDeploymentPermissions{
+			ServiceAccountName: resources.ServiceAccount.Name,
+			Rules:              resources.CnpgManagerClusterRole.Rules,
+		})
+	csv.Spec.InstallStrategy.StrategySpec.Permissions = append(csv.Spec.InstallStrategy.StrategySpec.Permissions,
+		operv1.StrategyDeploymentPermissions{
+			ServiceAccountName: resources.ServiceAccount.Name,
+			Rules:              resources.CnpgManagerRole.Rules,
+		})
+
+	// add cnpg CRDs as owned by this CSV
+	crdGenericDescription := "This CRD is intended for internal use by Noobaa Operator."
+	for _, c := range resources.CRDs {
+		crdDesc := operv1.CRDDescription{
+			Name:            c.Name,
+			Kind:            c.Spec.Names.Kind,
+			Version:         c.Spec.Versions[0].Name,
+			DisplayName:     c.Spec.Names.Kind,
+			Description:     crdGenericDescription,
+			SpecDescriptors: []operv1.SpecDescriptor{},
+			Resources:       []operv1.APIResourceReference{},
+		}
+		csv.Spec.CustomResourceDefinitions.Owned = append(csv.Spec.CustomResourceDefinitions.Owned, crdDesc)
+	}
+
+	// add webhook definitions to the CSV
+	for _, webhook := range resources.ValidatingWebhookConfiguration.Webhooks {
+		webhookDefinition := operv1.WebhookDescription{
+			Type:                    operv1.ValidatingAdmissionWebhook,
+			AdmissionReviewVersions: webhook.AdmissionReviewVersions,
+			ContainerPort:           443,
+			TargetPort: &intstr.IntOrString{
+				Type:   intstr.Int,
+				IntVal: 9443,
+				StrVal: "9443",
+			},
+			DeploymentName: resources.CnpgOperatorDeployment.Name,
+			FailurePolicy:  webhook.FailurePolicy,
+			MatchPolicy:    webhook.MatchPolicy,
+			GenerateName:   webhook.Name,
+			Rules:          webhook.Rules,
+			SideEffects:    webhook.SideEffects,
+			WebhookPath:    webhook.ClientConfig.Service.Path,
+		}
+		csv.Spec.WebhookDefinitions = append(csv.Spec.WebhookDefinitions, webhookDefinition)
+
+	}
+
+	for _, webhook := range resources.MutatingWebhookConfiguration.Webhooks {
+		webhookDefinition := operv1.WebhookDescription{
+			Type:                    operv1.MutatingAdmissionWebhook,
+			AdmissionReviewVersions: webhook.AdmissionReviewVersions,
+			ContainerPort:           443,
+			TargetPort: &intstr.IntOrString{
+				Type:   intstr.Int,
+				IntVal: 9443,
+				StrVal: "9443",
+			},
+			DeploymentName: resources.CnpgOperatorDeployment.Name,
+			FailurePolicy:  webhook.FailurePolicy,
+			MatchPolicy:    webhook.MatchPolicy,
+			GenerateName:   webhook.Name,
+			Rules:          webhook.Rules,
+			SideEffects:    webhook.SideEffects,
+			WebhookPath:    webhook.ClientConfig.Service.Path,
+		}
+		csv.Spec.WebhookDefinitions = append(csv.Spec.WebhookDefinitions, webhookDefinition)
+
+	}
+
+	csv.Spec.RelatedImages = append(csv.Spec.RelatedImages, operv1.RelatedImage{
+		Name:  "cnpg-operator",
+		Image: options.CnpgImage,
+	})
+
 }
 
 // RunHubInstall runs a CLI command

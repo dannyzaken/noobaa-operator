@@ -11,7 +11,7 @@ import (
 	"github.com/noobaa/noobaa-operator/v5/pkg/system"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util/kms"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -41,8 +41,12 @@ func simpleKmsSpec(token, apiAddress string) nbv1.KeyManagementServiceSpec {
 func checkExternalSecret(noobaa *nbv1.NooBaa, expectedNil bool) {
 	k := noobaa.Spec.Security.KeyManagementService
 	uid := string(noobaa.UID)
-	driver := &kms.Vault{uid}
-	path := k.ConnectionDetails[vault.VaultBackendPathKey] + driver.Path()
+	driver := kms.NewVault(noobaa.Name, noobaa.Namespace, uid)
+	secretPath := driver.Path()
+	if v, ok := (driver.Version(nil)).(*kms.VersionRotatingSecret); ok {
+		secretPath = v.BackendSecretName()
+	}
+	path := k.ConnectionDetails[vault.VaultBackendPathKey] + secretPath
 	cmd := exec.Command("kubectl", "exec", "vault-0", "--", "vault", "kv", "get", path)
 	logger.Printf("Running command: path %v args %v ", cmd.Path, cmd.Args)
 	err := cmd.Run()

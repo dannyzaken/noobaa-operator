@@ -42,6 +42,9 @@ func ValidateNamespaceStore(nsStore *nbv1.NamespaceStore) error {
 	case nbv1.NSStoreTypeAzureBlob:
 		return nil
 
+	case nbv1.NSStoreTypeGoogleCloudStorage:
+		return nil
+
 	default:
 		return util.ValidationError{
 			Msg: "Invalid Namespacestore type, please provide a valid Namespacestore type",
@@ -101,7 +104,7 @@ func ValidateNsStoreS3Compatible(nsStore *nbv1.NamespaceStore) error {
 		return nil
 	}
 
-	err := ValidateSignatureVersion(s3Compatible.SignatureVersion, nsStore.Name)
+	err := ValidateSignatureVersion(s3Compatible.SignatureVersion, s3Compatible.Endpoint, nsStore.Name)
 	if err != nil {
 		return err
 	}
@@ -122,7 +125,7 @@ func ValidateNsStoreIBMCos(nsStore *nbv1.NamespaceStore) error {
 		return nil
 	}
 
-	err := ValidateSignatureVersion(IBMCos.SignatureVersion, nsStore.Name)
+	err := ValidateSignatureVersion(IBMCos.SignatureVersion, "", nsStore.Name)
 	if err != nil {
 		return err
 	}
@@ -135,8 +138,8 @@ func ValidateNsStoreIBMCos(nsStore *nbv1.NamespaceStore) error {
 	return nil
 }
 
-//ValidateSignatureVersion validation, must be empty or v2 or v4
-func ValidateSignatureVersion(signature nbv1.S3SignatureVersion, nsStoreName string) error {
+// ValidateSignatureVersion validation, must be empty or v2 or v4
+func ValidateSignatureVersion(signature nbv1.S3SignatureVersion, nsStoreEndpoint string, nsStoreName string) error {
 	if signature != "" &&
 		signature != nbv1.S3SignatureVersionV2 &&
 		signature != nbv1.S3SignatureVersionV4 {
@@ -144,10 +147,21 @@ func ValidateSignatureVersion(signature nbv1.S3SignatureVersion, nsStoreName str
 			Msg: fmt.Sprintf("Invalid s3 signature version %q for namespace store %q", signature, nsStoreName),
 		}
 	}
+
+	if nsStoreEndpoint != "" {
+		u, _ := url.Parse(nsStoreEndpoint)
+		if u.Scheme == "http" {
+			if signature == "v4" {
+				return util.ValidationError{
+					Msg: fmt.Sprintf("Non-secure endpoint works only with signature-version %q. Please select signature version v2 for namespacestore", "v2"),
+				}
+			}
+		}
+	}
 	return nil
 }
 
-//ValidateEndPoint Endpoint validation and sets default
+// ValidateEndPoint Endpoint validation and sets default
 func ValidateEndPoint(endPointPointer *string) error {
 	endPoint := *endPointPointer
 
@@ -187,9 +201,6 @@ func ValidateNSEmptySecretName(ns nbv1.NamespaceStore) error {
 			if err := ValidateNSEmptyAWSARN(ns); err != nil {
 				return err
 			}
-			return util.ValidationError{
-				Msg: "Failed creating the namespacestore, please provide secret name",
-			}
 		}
 	case nbv1.NSStoreTypeS3Compatible:
 		if len(ns.Spec.S3Compatible.Secret.Name) == 0 {
@@ -205,6 +216,12 @@ func ValidateNSEmptySecretName(ns nbv1.NamespaceStore) error {
 		}
 	case nbv1.NSStoreTypeAzureBlob:
 		if len(ns.Spec.AzureBlob.Secret.Name) == 0 {
+			return util.ValidationError{
+				Msg: "Failed creating the namespacestore, please provide secret name",
+			}
+		}
+	case nbv1.NSStoreTypeGoogleCloudStorage:
+		if len(ns.Spec.GoogleCloudStorage.Secret.Name) == 0 {
 			return util.ValidationError{
 				Msg: "Failed creating the namespacestore, please provide secret name",
 			}
@@ -246,6 +263,12 @@ func ValidateNSEmptyTargetBucket(ns nbv1.NamespaceStore) error {
 				Msg: "Failed creating the namespacestore, please provide target bucket",
 			}
 		}
+	case nbv1.NSStoreTypeGoogleCloudStorage:
+		if len(ns.Spec.GoogleCloudStorage.TargetBucket) == 0 {
+			return util.ValidationError{
+				Msg: "Failed creating the namespacestore, please provide target bucket",
+			}
+		}
 	case nbv1.NSStoreTypeNSFS:
 		break
 	default:
@@ -283,6 +306,12 @@ func ValidateTargetNSBucketChange(ns nbv1.NamespaceStore, oldNs nbv1.NamespaceSt
 				Msg: "Changing a NamespaceStore target bucket is unsupported",
 			}
 		}
+	case nbv1.NSStoreTypeGoogleCloudStorage:
+		if oldNs.Spec.GoogleCloudStorage.TargetBucket != ns.Spec.GoogleCloudStorage.TargetBucket {
+			return util.ValidationError{
+				Msg: "Changing a NamespaceStore target bucket is unsupported",
+			}
+		}
 	default:
 		return util.ValidationError{
 			Msg: "Failed to identify NamespaceStore type",
@@ -293,12 +322,10 @@ func ValidateTargetNSBucketChange(ns nbv1.NamespaceStore, oldNs nbv1.NamespaceSt
 
 // ValidateNSEmptyAWSARN validates if ARN is present in the NamespaceStore Spec
 func ValidateNSEmptyAWSARN(ns nbv1.NamespaceStore) error {
-	if ns.Spec.Type == nbv1.NSStoreTypeAWSS3 {
-		if ns.Spec.AWSS3.AWSSTSRoleARN != nil {
-			if len(*ns.Spec.AWSS3.AWSSTSRoleARN) != 0 {
-				return util.ValidationError{
-					Msg: "Failed creating the namespacestore, AWS STS feature is not supported for namespacestore",
-				}
+	if ns.Spec.AWSS3 != nil {
+		if ns.Spec.AWSS3.AWSSTSRoleARN == nil {
+			return util.ValidationError{
+				Msg: "Failed creating the NamespaceStore, please provide a valid ARN or secret name",
 			}
 		}
 	}

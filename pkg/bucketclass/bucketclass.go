@@ -1,9 +1,10 @@
 package bucketclass
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
@@ -12,6 +13,7 @@ import (
 	"github.com/noobaa/noobaa-operator/v5/pkg/options"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/noobaa/noobaa-operator/v5/pkg/validations"
+	"github.com/sirupsen/logrus"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	sigyaml "sigs.k8s.io/yaml"
 )
+
+var ctx = context.TODO()
 
 // Cmd returns a CLI command
 func Cmd() *cobra.Command {
@@ -199,95 +203,26 @@ func CmdReconcile() *cobra.Command {
 
 // RunCreateSingleNamespaceBucketClass runs a CLI command
 func RunCreateSingleNamespaceBucketClass(cmd *cobra.Command, args []string) {
-	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeSingle, func(bucketClass *nbv1.BucketClass) ([]string, []string) {
-		resource, _ := cmd.Flags().GetString("resource")
-		if resource == "" {
-			log.Fatalf(`❌ Must provide one namespace store`)
-		}
-		bucketClass.Spec.NamespacePolicy.Single = &nbv1.SingleNamespacePolicy{
-			Resource: resource,
-		}
-		var namespaceStoresArr []string
-		return append(namespaceStoresArr, resource), []string{}
-	})
+	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeSingle, PopulateSingleNamespaceBucketClass)
 }
 
 // RunCreateMultiNamespaceBucketClass runs a CLI command
 func RunCreateMultiNamespaceBucketClass(cmd *cobra.Command, args []string) {
-	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeMulti, func(bucketClass *nbv1.BucketClass) ([]string, []string) {
-		writeResource, _ := cmd.Flags().GetString("write-resource")
-		readResources, _ := cmd.Flags().GetStringSlice("read-resources")
-		if writeResource == "" || len(readResources) == 0 {
-			log.Fatalf(`❌ Must provide one namespace store as write resource and at least one read resource`)
-		}
-		bucketClass.Spec.NamespacePolicy.Multi = &nbv1.MultiNamespacePolicy{
-			WriteResource: writeResource,
-			ReadResources: readResources,
-		}
-		return append(readResources, writeResource), []string{}
-	})
+	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeMulti, PopulateMultiNamespaceBucketClass)
 }
 
 // RunCreateCacheNamespaceBucketClass runs a CLI command
 func RunCreateCacheNamespaceBucketClass(cmd *cobra.Command, args []string) {
-	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeCache, func(bucketClass *nbv1.BucketClass) ([]string, []string) {
-		hubResource, _ := cmd.Flags().GetString("hub-resource")
-		cacheTTL, _ := cmd.Flags().GetUint32("ttl")
-		placement, _ := cmd.Flags().GetString("placement")
-		backingStores, _ := cmd.Flags().GetStringSlice("backingstores")
-		if hubResource == "" {
-			log.Fatalf(`❌ Must provide one namespace store as hub resource`)
-		}
-		if placement != "" && placement != "Spread" && placement != "Mirror" {
-			log.Fatalf(`❌ Must provide valid placement: Mirror | Spread | ""`)
-		}
-		if len(backingStores) == 0 {
-			log.Fatalf(`❌ Must provide at least one backing store`)
-		}
-		bucketClass.Spec.NamespacePolicy.Cache = &nbv1.CacheNamespacePolicy{
-			HubResource: hubResource,
-			Caching: &nbv1.CacheSpec{
-				TTL: int(cacheTTL),
-				// bucketClass.Spec.NamespacePolicy.Cache.Prefix = cachePrefix
-			},
-		}
-		bucketClass.Spec.PlacementPolicy.Tiers = append(bucketClass.Spec.PlacementPolicy.Tiers,
-			nbv1.Tier{Placement: nbv1.TierPlacement(placement), BackingStores: backingStores})
-
-		var namespaceStoresArr []string
-		return append(namespaceStoresArr, hubResource), backingStores
-	})
+	createCommonBucketclass(cmd, args, nbv1.NSBucketClassTypeCache, PopulateCacheNamespaceBucketClass)
 }
 
 // RunCreatePlacementBucketClass runs a CLI command
 func RunCreatePlacementBucketClass(cmd *cobra.Command, args []string) {
-	createCommonBucketclass(cmd, args, "", func(bucketClass *nbv1.BucketClass) ([]string, []string) {
-		placement, _ := cmd.Flags().GetString("placement")
-		if placement != "" && placement != "Spread" && placement != "Mirror" {
-			log.Fatalf(`❌ Must provide valid placement: Mirror | Spread | ""`)
-		}
-		backingStores, _ := cmd.Flags().GetStringSlice("backingstores")
-		if len(backingStores) == 0 {
-			log.Fatalf(`❌ Must provide at least one backing store`)
-		}
-		bucketClass.Spec.PlacementPolicy.Tiers = append(bucketClass.Spec.PlacementPolicy.Tiers,
-			nbv1.Tier{Placement: nbv1.TierPlacement(placement), BackingStores: backingStores})
-
-		maxSize, _ := cmd.Flags().GetString("max-size")
-		maxObjects, _ := cmd.Flags().GetString("max-objects")
-		if maxSize != "" || maxObjects != "" {
-			bucketClass.Spec.Quota = &nbv1.Quota{
-				MaxSize:    maxSize,
-				MaxObjects: maxObjects,
-			}
-		}
-
-		return []string{}, backingStores
-	})
+	createCommonBucketclass(cmd, args, "", PopulatePlacementBucketClass)
 }
 
 // createCommonBucketclass runs a CLI command
-func createCommonBucketclass(cmd *cobra.Command, args []string, bucketClassType nbv1.NSBucketClassType, populate func(bucketClass *nbv1.BucketClass) ([]string, []string)) {
+func createCommonBucketclass(cmd *cobra.Command, args []string, bucketClassType nbv1.NSBucketClassType, populate func(cmd *cobra.Command, bucketClassSpec *nbv1.BucketClassSpec) ([]string, []string)) {
 
 	log := util.Logger()
 	if len(args) != 1 || args[0] == "" {
@@ -326,7 +261,7 @@ func createCommonBucketclass(cmd *cobra.Command, args []string, bucketClassType 
 		log.Fatalf(`❌ BucketClass %q already exists in namespace %q`, bucketClass.Name, bucketClass.Namespace)
 	}
 
-	namespaceStoresArr, backingStoresArr := populate(bucketClass)
+	namespaceStoresArr, backingStoresArr := populate(cmd, &bucketClass.Spec)
 
 	err = validations.ValidateBucketClass(bucketClass)
 	if err != nil {
@@ -365,7 +300,7 @@ func createCommonBucketclass(cmd *cobra.Command, args []string, bucketClassType 
 
 	replicationPolicyJSON, _ := cmd.Flags().GetString("replication-policy")
 	if replicationPolicyJSON != "" {
-		replication, err := util.LoadBucketReplicationJSON(replicationPolicyJSON)
+		replication, err := util.LoadConfigurationJSON(replicationPolicyJSON)
 		if err != nil {
 			log.Fatalf(`❌ %q`, err)
 		}
@@ -388,6 +323,94 @@ func createCommonBucketclass(cmd *cobra.Command, args []string, bucketClassType 
 	}
 }
 
+// PopulateSingleNamespaceBucketClass populates namespace single bucketclass spec
+func PopulateSingleNamespaceBucketClass(cmd *cobra.Command, bucketClassSpec *nbv1.BucketClassSpec) ([]string, []string) {
+	log := util.Logger()
+	resource, _ := cmd.Flags().GetString("resource")
+	if resource == "" {
+		log.Fatalf(`❌ Must provide one namespace store`)
+	}
+	bucketClassSpec.NamespacePolicy.Single = &nbv1.SingleNamespacePolicy{
+		Resource: resource,
+	}
+	var namespaceStoresArr []string
+	return append(namespaceStoresArr, resource), []string{}
+}
+
+// PopulateMultiNamespaceBucketClass populates namespace multi bucketclass spec
+func PopulateMultiNamespaceBucketClass(cmd *cobra.Command, bucketClassSpec *nbv1.BucketClassSpec) ([]string, []string) {
+	log := util.Logger()
+	writeResource, _ := cmd.Flags().GetString("write-resource")
+	readResources, _ := cmd.Flags().GetStringSlice("read-resources")
+	if len(readResources) == 0 {
+		log.Fatalf(`❌ Must provide at least one read resource`)
+	}
+	bucketClassSpec.NamespacePolicy.Multi = &nbv1.MultiNamespacePolicy{
+		WriteResource: writeResource,
+		ReadResources: readResources,
+	}
+	if writeResource == "" {
+		return readResources, []string{}
+	}
+	return append(readResources, writeResource), []string{}
+}
+
+// PopulateCacheNamespaceBucketClass populates namespace cache bucketclass spec
+func PopulateCacheNamespaceBucketClass(cmd *cobra.Command, bucketClassSpec *nbv1.BucketClassSpec) ([]string, []string) {
+	log := util.Logger()
+	hubResource, _ := cmd.Flags().GetString("hub-resource")
+	cacheTTL, _ := cmd.Flags().GetUint32("ttl")
+	placement, _ := cmd.Flags().GetString("placement")
+	backingStores, _ := cmd.Flags().GetStringSlice("backingstores")
+	if hubResource == "" {
+		log.Fatalf(`❌ Must provide one namespace store as hub resource`)
+	}
+	if placement != "" && placement != "Spread" && placement != "Mirror" {
+		log.Fatalf(`❌ Must provide valid placement: Mirror | Spread | ""`)
+	}
+	if len(backingStores) == 0 {
+		log.Fatalf(`❌ Must provide at least one backing store`)
+	}
+	bucketClassSpec.NamespacePolicy.Cache = &nbv1.CacheNamespacePolicy{
+		HubResource: hubResource,
+		Caching: &nbv1.CacheSpec{
+			TTL: int(cacheTTL),
+			// bucketClass.Spec.NamespacePolicy.Cache.Prefix = cachePrefix
+		},
+	}
+	bucketClassSpec.PlacementPolicy.Tiers = append(bucketClassSpec.PlacementPolicy.Tiers,
+		nbv1.Tier{Placement: nbv1.TierPlacement(placement), BackingStores: backingStores})
+
+	var namespaceStoresArr []string
+	return append(namespaceStoresArr, hubResource), backingStores
+}
+
+// PopulatePlacementBucketClass populates namespace cache bucketclass spec
+func PopulatePlacementBucketClass(cmd *cobra.Command, bucketClassSpec *nbv1.BucketClassSpec) ([]string, []string) {
+	log := util.Logger()
+	placement, _ := cmd.Flags().GetString("placement")
+	if placement != "" && placement != "Spread" && placement != "Mirror" {
+		log.Fatalf(`❌ Must provide valid placement: Mirror | Spread | ""`)
+	}
+	backingStores, _ := cmd.Flags().GetStringSlice("backingstores")
+	if len(backingStores) == 0 {
+		log.Fatalf(`❌ Must provide at least one backing store`)
+	}
+	bucketClassSpec.PlacementPolicy.Tiers = append(bucketClassSpec.PlacementPolicy.Tiers,
+		nbv1.Tier{Placement: nbv1.TierPlacement(placement), BackingStores: backingStores})
+
+	maxSize, _ := cmd.Flags().GetString("max-size")
+	maxObjects, _ := cmd.Flags().GetString("max-objects")
+	if maxSize != "" || maxObjects != "" {
+		bucketClassSpec.Quota = &nbv1.Quota{
+			MaxSize:    maxSize,
+			MaxObjects: maxObjects,
+		}
+	}
+
+	return []string{}, backingStores
+}
+
 // RunDelete runs a CLI command
 func RunDelete(cmd *cobra.Command, args []string) {
 
@@ -401,6 +424,11 @@ func RunDelete(cmd *cobra.Command, args []string) {
 	bucketClass := o.(*nbv1.BucketClass)
 	bucketClass.Name = args[0]
 	bucketClass.Namespace = options.Namespace
+
+	if !util.KubeCheck(bucketClass) {
+		log.Fatalf(`❌ Could not delete, BucketClass %q in namespace %q does not exist`,
+			bucketClass.Name, bucketClass.Namespace)
+	}
 
 	if !util.KubeDelete(bucketClass) {
 		log.Fatalf(`❌ Could not delete BucketClass %q in namespace %q`,
@@ -442,9 +470,9 @@ func WaitReady(bucketClass *nbv1.BucketClass) bool {
 	log := util.Logger()
 	klient := util.KubeClient()
 
-	intervalSec := time.Duration(3)
+	interval := time.Duration(3)
 
-	err := wait.PollImmediateInfinite(intervalSec*time.Second, func() (bool, error) {
+	err := wait.PollUntilContextCancel(ctx, interval*time.Second, true, func(ctx context.Context) (bool, error) {
 		err := klient.Get(util.Context(), util.ObjectKey(bucketClass), bucketClass)
 		if err != nil {
 			log.Printf("⏳ Failed to get BucketClass: %s", err)
@@ -535,8 +563,8 @@ func RunReconcile(cmd *cobra.Command, args []string) {
 	}
 	bucketClassName := args[0]
 	klient := util.KubeClient()
-	intervalSec := time.Duration(3)
-	util.Panic(wait.PollImmediateInfinite(intervalSec*time.Second, func() (bool, error) {
+	interval := time.Duration(3)
+	util.Panic(wait.PollUntilContextCancel(ctx, interval*time.Second, true, func(ctx context.Context) (bool, error) {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Namespace: options.Namespace,
@@ -548,7 +576,7 @@ func RunReconcile(cmd *cobra.Command, args []string) {
 			return false, err
 		}
 		if res.Requeue || res.RequeueAfter != 0 {
-			log.Printf("\nRetrying in %d seconds\n", intervalSec)
+			log.Printf("\nRetrying in %d seconds\n", interval)
 			return false, nil
 		}
 		return true, nil
@@ -578,13 +606,12 @@ func ParseBucketClassType(cmd *cobra.Command) nbv1.StoreType {
 // MapBackingstoreToBucketclasses returns a list of bucketclasses that uses the backingstore in their tiering policy
 // used by bucketclass_contorller to watch backingstore changes
 func MapBackingstoreToBucketclasses(backingstore types.NamespacedName) []reconcile.Request {
-	log := util.Logger()
-	log.Infof("checking which bucketclasses to reconcile. mapping backingstore %v to bucketclasses", backingstore)
+	logrus.Infof("checking which bucketclasses to reconcile. mapping backingstore %v to bucketclasses", backingstore)
 	bucketclassList := &nbv1.BucketClassList{
 		TypeMeta: metav1.TypeMeta{Kind: "BucketClassList"},
 	}
 	if !util.KubeList(bucketclassList, &client.ListOptions{Namespace: backingstore.Namespace}) {
-		log.Infof("did not find backing stores in namespace %q", backingstore.Namespace)
+		logrus.Infof("Could not found bucketClasses in namespace %q", backingstore.Namespace)
 		return nil
 	}
 
@@ -607,7 +634,7 @@ func MapBackingstoreToBucketclasses(backingstore types.NamespacedName) []reconci
 			}
 		}
 	}
-	log.Infof("will reconcile these bucketclasses: %v", reqs)
+	logrus.Infof("will reconcile these bucketclasses: %v", reqs)
 
 	return reqs
 }
@@ -615,13 +642,12 @@ func MapBackingstoreToBucketclasses(backingstore types.NamespacedName) []reconci
 // MapNamespacestoreToBucketclasses returns a list of bucketclasses that uses the namespacestore in their namespace policy
 // used by bucketclass_contorller to watch namespacestores changes
 func MapNamespacestoreToBucketclasses(namespacestore types.NamespacedName) []reconcile.Request {
-	log := util.Logger()
-	log.Infof("checking which bucketclasses to reconcile. mapping namespacestore %v to bucketclasses", namespacestore)
+	logrus.Infof("checking which bucketclasses to reconcile. mapping namespacestore %v to bucketclasses", namespacestore)
 	bucketclassList := &nbv1.BucketClassList{
 		TypeMeta: metav1.TypeMeta{Kind: "BucketClassList"},
 	}
 	if !util.KubeList(bucketclassList, &client.ListOptions{Namespace: namespacestore.Namespace}) {
-		log.Infof("did not find namespace stores in namespace %q", namespacestore.Namespace)
+		logrus.Infof("did not find namespace stores in namespace %q", namespacestore.Namespace)
 		return nil
 	}
 
@@ -632,7 +658,8 @@ func MapNamespacestoreToBucketclasses(namespacestore types.NamespacedName) []rec
 			continue
 		}
 		policyType := bc.Spec.NamespacePolicy.Type
-		if policyType == nbv1.NSBucketClassTypeSingle {
+		switch policyType {
+		case nbv1.NSBucketClassTypeSingle:
 			nsr := bc.Spec.NamespacePolicy.Single.Resource
 			if nsr == namespacestore.Name {
 				reqs = append(reqs, reconcile.Request{
@@ -642,7 +669,7 @@ func MapNamespacestoreToBucketclasses(namespacestore types.NamespacedName) []rec
 					},
 				})
 			}
-		} else if policyType == nbv1.NSBucketClassTypeCache {
+		case nbv1.NSBucketClassTypeCache:
 			nsr := bc.Spec.NamespacePolicy.Cache.HubResource
 			if nsr == namespacestore.Name {
 				reqs = append(reqs, reconcile.Request{
@@ -652,7 +679,7 @@ func MapNamespacestoreToBucketclasses(namespacestore types.NamespacedName) []rec
 					},
 				})
 			}
-		} else if policyType == nbv1.NSBucketClassTypeMulti {
+		case nbv1.NSBucketClassTypeMulti:
 			nsr := bc.Spec.NamespacePolicy.Multi.WriteResource
 			if nsr == namespacestore.Name {
 				reqs = append(reqs, reconcile.Request{
@@ -674,18 +701,18 @@ func MapNamespacestoreToBucketclasses(namespacestore types.NamespacedName) []rec
 			}
 		}
 	}
-	log.Infof("will reconcile these bucketclasses: %v", reqs)
+	logrus.Infof("will reconcile these bucketclasses: %v", reqs)
 
 	return reqs
 }
 
 // CreateTieringStructure creates a tering policy for a bucket
-func CreateTieringStructure(BucketClass nbv1.BucketClass, BucketName string, nbClient nb.Client) (string, error) {
+func CreateTieringStructure(PlacementPolicy nbv1.PlacementPolicy, BucketName string, nbClient nb.Client) (string, error) {
 	tierName := fmt.Sprintf("%s.%x", BucketName, time.Now().Unix())
 	tiers := []nb.TierItem{}
 
-	for i := range BucketClass.Spec.PlacementPolicy.Tiers {
-		tier := BucketClass.Spec.PlacementPolicy.Tiers[i]
+	for i := range PlacementPolicy.Tiers {
+		tier := PlacementPolicy.Tiers[i]
 		name := fmt.Sprintf("%s.%d", tierName, i)
 		tiers = append(tiers, nb.TierItem{Order: int64(i), Tier: name})
 		// we assume either mirror or spread but no mix and the bucket class controller rejects mixed classes.
@@ -709,9 +736,49 @@ func CreateTieringStructure(BucketClass nbv1.BucketClass, BucketName string, nbC
 		Tiers: tiers,
 	})
 	if err != nil {
-		return tierName, fmt.Errorf("Failed to create tier %q with error: %v", tierName, err)
+		return tierName, fmt.Errorf("Failed to create tiering policy %q with error: %v", tierName, err)
 	}
 	return tierName, nil
+}
+
+// CreateNamespaceBucketInfoStructure creates a namespace bucket info for a bucket
+func CreateNamespaceBucketInfoStructure(namespacePolicy nbv1.NamespacePolicy, path string) *nb.NamespaceBucketInfo {
+	log := util.Logger()
+	log.Infof("creating namespace bucket info stucture %+v from namespace policy", namespacePolicy)
+
+	namespacePolicyType := namespacePolicy.Type
+	var readResources []nb.NamespaceResourceFullConfig
+	namespaceBucketInfo := &nb.NamespaceBucketInfo{}
+
+	switch namespacePolicyType {
+	case nbv1.NSBucketClassTypeSingle:
+
+		namespaceBucketInfo.WriteResource = nb.NamespaceResourceFullConfig{
+			Resource: namespacePolicy.Single.Resource,
+			Path:     path,
+		}
+		namespaceBucketInfo.ReadResources = append(readResources, nb.NamespaceResourceFullConfig{
+			Resource: namespacePolicy.Single.Resource})
+	case nbv1.NSBucketClassTypeMulti:
+		if namespacePolicy.Multi.WriteResource != "" {
+			namespaceBucketInfo.WriteResource = nb.NamespaceResourceFullConfig{
+				Resource: namespacePolicy.Multi.WriteResource,
+				Path:     path,
+			}
+		}
+		for i := range namespacePolicy.Multi.ReadResources {
+			rr := namespacePolicy.Multi.ReadResources[i]
+			readResources = append(readResources, nb.NamespaceResourceFullConfig{Resource: rr})
+		}
+		namespaceBucketInfo.ReadResources = readResources
+	case nbv1.NSBucketClassTypeCache:
+		namespaceBucketInfo.WriteResource = nb.NamespaceResourceFullConfig{Resource: namespacePolicy.Cache.HubResource}
+		namespaceBucketInfo.ReadResources = append(readResources, nb.NamespaceResourceFullConfig{Resource: namespacePolicy.Cache.HubResource})
+		namespaceBucketInfo.Caching = &nb.CacheSpec{TTLMs: namespacePolicy.Cache.Caching.TTL}
+		//cachePrefix := r.BucketClass.Spec.NamespacePolicy.Cache.Prefix
+	}
+	log.Infof("created namespace bucket info stucture successfully %+v ", namespaceBucketInfo)
+	return namespaceBucketInfo
 }
 
 // GetDefaultBucketClass will get the default bucket class
@@ -728,12 +795,12 @@ func GetDefaultBucketClass(Namespace string) (*nbv1.BucketClass, error) {
 
 	if !util.KubeCheck(bucketClass) {
 		msg := fmt.Sprintf("GetDefaultBucketClass BucketClass %q not found in provisioner namespace %q", bucketClassName, Namespace)
-		return nil, fmt.Errorf(msg)
+		return nil, errors.New(msg)
 	}
 
 	if bucketClass.Status.Phase != nbv1.BucketClassPhaseReady {
 		msg := fmt.Sprintf("GetDefaultBucketClass BucketClass %q is %v", bucketClassName, bucketClass.Status.Phase)
-		return nil, fmt.Errorf(msg)
+		return nil, errors.New(msg)
 	}
 
 	return bucketClass, nil

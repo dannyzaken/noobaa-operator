@@ -7,11 +7,15 @@ import (
 	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/noobaa/noobaa-operator/v5/pkg/validations"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func Pointerify(number int) *int {
+	return &number
+}
 
 var _ = Describe("BackingStore admission unit tests", func() {
 
@@ -199,7 +203,7 @@ var _ = Describe("BackingStore admission unit tests", func() {
 					bs.Spec = nbv1.BackingStoreSpec{
 						Type: nbv1.StoreTypePVPool,
 						PVPool: &nbv1.PVPoolSpec{
-							VolumeResources: &corev1.ResourceRequirements{
+							VolumeResources: &corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *resource.NewScaledQuantity(int64(5), resource.Giga),
 								},
@@ -216,7 +220,7 @@ var _ = Describe("BackingStore admission unit tests", func() {
 					bs.Spec = nbv1.BackingStoreSpec{
 						Type: nbv1.StoreTypePVPool,
 						PVPool: &nbv1.PVPoolSpec{
-							VolumeResources: &corev1.ResourceRequirements{
+							VolumeResources: &corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *resource.NewScaledQuantity(int64(20), resource.Giga),
 								},
@@ -394,7 +398,7 @@ var _ = Describe("NamespaceStore admission unit tests", func() {
 					}
 					err = validations.ValidateNSEmptySecretName(*ns)
 					Ω(err).Should(HaveOccurred())
-					Expect(err.Error()).To(Equal("Failed creating the namespacestore, please provide secret name"))
+					Expect(err.Error()).To(Equal("Failed creating the NamespaceStore, please provide a valid ARN or secret name"))
 				})
 				It("Should Allow", func() {
 					ns.Spec = nbv1.NamespaceStoreSpec{
@@ -556,6 +560,67 @@ var _ = Describe("NamespaceStore admission unit tests", func() {
 				})
 			})
 		})
+
+		Describe("S3-compatible namespacestore", func() {
+			Context("signature version and non-secure endpoint", func() {
+				It("Should Deny", func() {
+					ns.Spec = nbv1.NamespaceStoreSpec{
+						Type: nbv1.NSStoreTypeS3Compatible,
+						S3Compatible: &nbv1.S3CompatibleSpec{
+							Endpoint:         "http://test.com",
+							SignatureVersion: "v4",
+							TargetBucket:     "test",
+							Secret: corev1.SecretReference{
+								Name:      "secret-name",
+								Namespace: "test",
+							},
+						},
+					}
+					ns.Name = "nsfs-signV4-http-endpoint"
+					err = validations.ValidateNamespaceStore(ns)
+					Ω(err).Should(HaveOccurred())
+					Expect(err.Error()).To(Equal("Non-secure endpoint works only with signature-version \"v2\". Please select signature version v2 for namespacestore"))
+				})
+
+				It("Should Allow", func() {
+					ns.Spec = nbv1.NamespaceStoreSpec{
+						Type: nbv1.NSStoreTypeS3Compatible,
+						S3Compatible: &nbv1.S3CompatibleSpec{
+							Endpoint:         "http://test.com",
+							SignatureVersion: "v2",
+							TargetBucket:     "test",
+							Secret: corev1.SecretReference{
+								Name:      "secret-name",
+								Namespace: "test",
+							},
+						},
+					}
+					ns.Name = "nsfs-signV4-http-endpoint"
+					err = validations.ValidateNamespaceStore(ns)
+					Ω(err).ShouldNot(HaveOccurred())
+				})
+			})
+
+			Context("signature version and secure endpoint", func() {
+				It("Should Allow", func() {
+					ns.Spec = nbv1.NamespaceStoreSpec{
+						Type: nbv1.NSStoreTypeS3Compatible,
+						S3Compatible: &nbv1.S3CompatibleSpec{
+							Endpoint:         "https://test.com",
+							SignatureVersion: "v4",
+							TargetBucket:     "test",
+							Secret: corev1.SecretReference{
+								Name:      "secret-name",
+								Namespace: "test",
+							},
+						},
+					}
+					ns.Name = "nsfs-signV4-https-endpoint"
+					err = validations.ValidateNamespaceStore(ns)
+					Ω(err).ShouldNot(HaveOccurred())
+				})
+			})
+		})
 	})
 
 	Describe("Validate update operations", func() {
@@ -709,8 +774,8 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 				It("Should Deny Negative UID", func() {
 					na.Spec = nbv1.NooBaaAccountSpec{
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            -3,
-							GID:            2,
+							UID:            Pointerify(-3),
+							GID:            Pointerify(2),
 							NewBucketsPath: "/",
 							NsfsOnly:       true,
 						},
@@ -722,8 +787,8 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 				It("Should Deny Negative GID", func() {
 					na.Spec = nbv1.NooBaaAccountSpec{
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            3,
-							GID:            -2,
+							UID:            Pointerify(3),
+							GID:            Pointerify(-2),
 							NewBucketsPath: "/",
 							NsfsOnly:       true,
 						},
@@ -735,8 +800,8 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 				It("Should Allow", func() {
 					na.Spec = nbv1.NooBaaAccountSpec{
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            3,
-							GID:            2,
+							UID:            Pointerify(3),
+							GID:            Pointerify(2),
 							NewBucketsPath: "/",
 							NsfsOnly:       true,
 						},
@@ -765,15 +830,14 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 					na.Spec = nbv1.NooBaaAccountSpec{
 						AllowBucketCreate: true,
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            3,
-							GID:            2,
+							UID:            Pointerify(3),
+							GID:            Pointerify(2),
 							NewBucketsPath: "/",
 							NsfsOnly:       true,
 						},
 					}
 
-					updatedNA.Spec = nbv1.NooBaaAccountSpec{
-					}
+					updatedNA.Spec = nbv1.NooBaaAccountSpec{}
 
 					err = validations.ValidateRemoveNSFSConfig(*updatedNA, *na)
 					Ω(err).Should(HaveOccurred())
@@ -784,8 +848,8 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 				It("Should Allow", func() {
 					na.Spec = nbv1.NooBaaAccountSpec{
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            3,
-							GID:            2,
+							UID:            Pointerify(3),
+							GID:            Pointerify(2),
 							NewBucketsPath: "/",
 							NsfsOnly:       true,
 						},
@@ -793,14 +857,51 @@ var _ = Describe("NooBaaAccount admission unit tests", func() {
 
 					updatedNA.Spec = nbv1.NooBaaAccountSpec{
 						NsfsAccountConfig: &nbv1.AccountNsfsConfig{
-							UID:            30,
-							GID:            20,
+							UID:            Pointerify(30),
+							GID:            Pointerify(20),
 							NewBucketsPath: "/new/",
 							NsfsOnly:       false,
 						},
 					}
 
 					err = validations.ValidateRemoveNSFSConfig(*na, *updatedNA)
+					Ω(err).ShouldNot(HaveOccurred())
+				})
+			})
+		})
+	})
+})
+
+var _ = Describe("Noobaa admission unit tests", func() {
+
+	var (
+		nb  *nbv1.NooBaa
+		err error
+	)
+
+	BeforeEach(func() {
+		nb = util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaa_cr_yaml).(*nbv1.NooBaa)
+		nb.Name = "noobaa"
+		nb.Namespace = "test"
+
+	})
+
+	Describe("Validate delete operations", func() {
+		Describe("General noobaa validations", func() {
+			Context("cleanup policy not set", func() {
+				It("Should Deny", func() {
+					err = validations.ValidateNoobaaDeletion(*nb)
+					Ω(err).Should(HaveOccurred())
+					Expect(err.Error()).To(Equal("Noobaa cleanup policy is not set, blocking Noobaa deletion"))
+				})
+				It("Should Allow", func() {
+					nb.Spec = nbv1.NooBaaSpec{
+						CleanupPolicy: nbv1.CleanupPolicySpec{
+							Confirmation:        "confirmed",
+							AllowNoobaaDeletion: true,
+						},
+					}
+					err = validations.ValidateNoobaaDeletion(*nb)
 					Ω(err).ShouldNot(HaveOccurred())
 				})
 			})

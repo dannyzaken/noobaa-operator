@@ -42,7 +42,7 @@ func deletePodsOnStartup(client client.Client) error {
 		if !nodeIsReady(&node) {
 			pd := hac.PodDeleter{Client: client, NodeName: node.Name}
 			if err := pd.DeletePodsOnNode(); err != nil {
-				return errors.Errorf("failed to delete noobaa pods on the node %v in namespace %v", node.Name, options.Namespace)	
+				return errors.Errorf("failed to delete noobaa pods on the node %v in namespace %v", node.Name, options.Namespace)
 			}
 		}
 	}
@@ -75,7 +75,7 @@ func Add(mgr manager.Manager) error {
 	opts := controller.Options{
 		MaxConcurrentReconciles: 1,
 		Reconciler: reconcile.Func(
-			func(ctx context.Context,req reconcile.Request) (reconcile.Result, error) {
+			func(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 				return hac.NewHAC(
 					req.NamespacedName,
 					mgr.GetClient(),
@@ -89,7 +89,7 @@ func Add(mgr manager.Manager) error {
 	}
 
 	// start watching node state transitions
-	if err := c.Watch(&source.Kind{Type: &corev1.Node{}}, &handler.EnqueueRequestForObject{}, nodeNotReadyPredicate()); err != nil {
+	if err := c.Watch(source.Kind[client.Object](mgr.GetCache(), &corev1.Node{}, &handler.EnqueueRequestForObject{}, nodeNotReadyPredicate())); err != nil {
 		return err
 	}
 

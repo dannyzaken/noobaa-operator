@@ -2,7 +2,6 @@ package kms
 
 import (
 	"fmt"
-	"os"
 	"syscall"
 
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
@@ -16,7 +15,7 @@ import (
 
 // IBM is a NooBaa root master key ibmKpSecretStorage driver
 type IBM struct {
-	UID string  // NooBaa system UID
+	UID string // NooBaa system UID
 }
 
 // NewIBM is IBM KP driver constructor
@@ -24,7 +23,7 @@ func NewIBM(
 	name string,
 	namespace string,
 	uid string,
-) (Driver) {
+) Driver {
 	return &IBM{uid}
 }
 
@@ -37,11 +36,11 @@ func (i *IBM) Config(config map[string]string, tokenSecretName, namespace string
 	}
 
 	// Cloud service IBM KP Instance ID should be passed from NooBaa CR
-	instanceID, instanceIDFound  := config[IbmInstanceIDKey]
+	instanceID, instanceIDFound := config[IbmInstanceIDKey]
 	if !instanceIDFound {
 		return nil, fmt.Errorf("❌ Unable to find IBM Key Protect instance ID in CR %v", IbmInstanceIDKey)
 	}
-	os.Setenv(IbmInstanceIDKey, instanceID)
+	util.SafeSetEnv(IbmInstanceIDKey, instanceID)
 
 	// Fetch API Key from k8s secret
 	_, api := syscall.Getenv(IbmServiceAPIKey)
@@ -69,7 +68,7 @@ func (*IBM) keysFromSecret(tokenSecretName, namespace string, c map[string]inter
 			return fmt.Errorf(`❌ Could not find key %v in secret %q in namespace %q`, key, secret.Name, secret.Namespace)
 		}
 		c[key] = val
-		os.Setenv(key, val) // cache the value in environment
+		util.SafeSetEnv(key, val) // cache the value in environment
 	}
 
 	return nil
@@ -98,6 +97,12 @@ func (*IBM) SetContext() map[string]string {
 // DeleteContext returns context used for secret delete operation
 func (*IBM) DeleteContext() map[string]string {
 	return nil
+}
+
+// Version returns the current driver KMS version
+// either singlse string or map, i.e. rotating key
+func (*IBM) Version(kms *KMS) Version {
+	return &VersionSingleSecret{kms, nil}
 }
 
 // Register IBM KP driver with KMS layer

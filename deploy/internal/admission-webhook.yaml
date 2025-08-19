@@ -31,6 +31,15 @@ webhooks:
       resources:   
       - "noobaaaccounts"
       scope: "Namespaced"
+    - apiGroups:   ["noobaa.io"]
+      apiVersions: ["v1alpha1"]
+      operations:  
+      - "DELETE"
+      - "CREATE"
+      - "UPDATE"
+      resources:   
+      - "noobaas"
+      scope: "Namespaced"
     sideEffects: None
     clientConfig:
       service:

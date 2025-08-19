@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"sync"
 	"time"
 
@@ -112,7 +111,7 @@ func (c *RPCConnWS) ConnectUnderLock() error {
 	}
 
 	logrus.Infof("RPC: Connecting websocket (%p) %+v", c, c)
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), connectTimeout) 
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer dialCancel()
 	ws, _, err := websocket.Dial(dialCtx, c.Address, &websocket.DialOptions{HTTPClient: &c.RPC.HTTPClient})
 	if err != nil {
@@ -135,7 +134,6 @@ func (c *RPCConnWS) ConnectUnderLock() error {
 func (c *RPCConnWS) ping() error {
 	ctx, cancel := context.WithTimeout(context.Background(), pongTimeout)
 	defer cancel()
-	logrus.Infof("RPC: Ping (%p) %+v", c, c)
 	return c.WS.Ping(ctx)
 }
 
@@ -320,8 +318,8 @@ func (c *RPCConnWS) ReadMessage() (*RPCMessage, error) {
 	msg.RawBytes = msgBytes
 
 	// Read message buffers if any
-	if msg.Buffers != nil && len(msg.Buffers) > 0 {
-		buffers, err := ioutil.ReadAll(reader)
+	if len(msg.Buffers) > 0 {
+		buffers, err := io.ReadAll(reader)
 		// if err != nil && err.Error() != "failed to read: cannot use EOFed reader" {
 		if err != nil {
 			return nil, err

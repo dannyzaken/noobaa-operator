@@ -14,7 +14,7 @@ const (
 	maskString  = "****"
 )
 
-// MaskedString is a string type for sensitive string, masked when formated
+// MaskedString is a string type for sensitive string, masked when formatted
 type MaskedString string
 
 func (MaskedString) String() string {
@@ -51,8 +51,7 @@ type AccountInfo struct {
 		Count       int                      `json:"count"`
 		Connections []ExternalConnectionInfo `json:"connections"`
 	} `json:"external_connections"`
-	AllowedBuckets AllowedBuckets `json:"allowed_buckets"`
-	Systems        []struct {
+	Systems []struct {
 		Name  string   `json:"name"`
 		Roles []string `json:"roles"`
 	} `json:"systems"`
@@ -62,15 +61,16 @@ type AccountInfo struct {
 	// NsfsAccountConfig specifies the configurations on Namespace FS
 	// +nullable
 	// +optional
-	NsfsAccountConfig *nbv1.AccountNsfsConfig	`json:"nsfs_account_config,omitempty"`
+	NsfsAccountConfig *nbv1.AccountNsfsConfig `json:"nsfs_account_config,omitempty"`
 }
 
 // BucketInfo is a struct of bucket info returned by the API
 type BucketInfo struct {
-	Name        string `json:"name"`
-	BucketType  string `json:"bucket_type"`
-	Mode        string `json:"mode"`
-	Undeletable string `json:"undeletable"`
+	Name         string `json:"name"`
+	BucketType   string `json:"bucket_type"`
+	Mode         string `json:"mode"`
+	Undeletable  string `json:"undeletable"`
+	ForceMd5Etag *bool  `json:"force_md5_etag,omitempty"`
 
 	BucketClaim  *BucketClaimInfo   `json:"bucket_claim,omitempty"`
 	Tiering      *TieringPolicyInfo `json:"tiering,omitempty"`
@@ -196,15 +196,16 @@ type PoolInfo struct {
 
 // NamespaceResourceInfo is a struct of namespace resource info returned by the API
 type NamespaceResourceInfo struct {
-	Name         string          `json:"name"`
-	Mode         string          `json:"mode,omitempty"`
-	Undeletable  string          `json:"undeletable,omitempty"`
-	EndpointType EndpointType    `json:"endpoint_type,omitempty"`
-	Endpoint     string          `json:"endpoint,omitempty"`
-	TargetBucket string          `json:"target_bucket,omitempty"`
-	Identity     string          `json:"identity,omitempty"`
-	AuthMethod   CloudAuthMethod `json:"auth_method,omitempty"`
-	CpCode       string          `json:"cp_code,omitempty"`
+	Name         string              `json:"name"`
+	Mode         string              `json:"mode,omitempty"`
+	Undeletable  string              `json:"undeletable,omitempty"`
+	EndpointType EndpointType        `json:"endpoint_type,omitempty"`
+	Endpoint     string              `json:"endpoint,omitempty"`
+	TargetBucket string              `json:"target_bucket,omitempty"`
+	AccessMode   nbv1.AccessModeType `json:"access_mode"`
+	Identity     string              `json:"identity,omitempty"`
+	AuthMethod   CloudAuthMethod     `json:"auth_method,omitempty"`
+	CpCode       string              `json:"cp_code,omitempty"`
 }
 
 // NamespaceResourceOperatorInfo is a struct of namespace resource secrets returned by the API
@@ -222,8 +223,8 @@ type PoolHostsInfo struct {
 
 // S3AccessKeys is a struct holding S3 access and secret keys
 type S3AccessKeys struct {
-	AccessKey string `json:"access_key"`
-	SecretKey string `json:"secret_key"`
+	AccessKey MaskedString `json:"access_key"`
+	SecretKey MaskedString `json:"secret_key"`
 }
 
 // ReadAuthReply is the reply of auth_api.read_auth()
@@ -257,6 +258,16 @@ type ReadPoolParams struct {
 	Name string `json:"name"`
 }
 
+// ListAccountsParams is the params to account_api.list_accounts()
+type ListAccountsParams struct {
+	Filter struct {
+		FsIdentity struct {
+			UID int `json:"uid"`
+			GID int `json:"gid"`
+		} `json:"fs_identity"`
+	} `json:"filter"`
+}
+
 // ReadNamespaceResourceParams is the params to pool_api.read_namespace_resource()
 type ReadNamespaceResourceParams struct {
 	Name string `json:"name"`
@@ -270,6 +281,12 @@ type ReadySystemStatusReply struct {
 // ListAccountsReply is the reply to account_api.list_accounts()
 type ListAccountsReply struct {
 	Accounts []*AccountInfo `json:"accounts"`
+}
+
+// ListBcuketsParams is the params to account_api.list_buckets()
+type ListBucketsParams struct {
+	ContinuationToken *string `json:"continuation_token,omitempty"`
+	MaxBuckets *int `json:"max_buckets,omitempty"`
 }
 
 // ListBucketsReply is the reply of bucket_api.list_buckets()
@@ -327,11 +344,12 @@ type CreateSystemReply struct {
 
 // CreateBucketParams is the params of bucket_api.create_bucket()
 type CreateBucketParams struct {
-	Name        string               `json:"name"`
-	Tiering     string               `json:"tiering,omitempty"`
-	BucketClaim *BucketClaimInfo     `json:"bucket_claim,omitempty"`
-	Namespace   *NamespaceBucketInfo `json:"namespace,omitempty"`
-	Quota       *QuotaConfig         `json:"quota,omitempty"`
+	Name         string               `json:"name"`
+	Tiering      string               `json:"tiering,omitempty"`
+	ForceMd5Etag *bool                `json:"force_md5_etag,omitempty"`
+	BucketClaim  *BucketClaimInfo     `json:"bucket_claim,omitempty"`
+	Namespace    *NamespaceBucketInfo `json:"namespace,omitempty"`
+	Quota        *QuotaConfig         `json:"quota,omitempty"`
 }
 
 // QuotaConfig quota configuration
@@ -340,7 +358,7 @@ type QuotaConfig struct {
 	Quantity *QuantityQuotaConfig `json:"quantity,omitempty"`
 }
 
-//SizeQuotaConfig size quota configuration
+// SizeQuotaConfig size quota configuration
 type SizeQuotaConfig struct {
 	//limits the max total size value
 	Value float64 `json:"value,omitempty"`
@@ -348,7 +366,7 @@ type SizeQuotaConfig struct {
 	Unit string `json:"unit,omitempty"`
 }
 
-//QuantityQuotaConfig quantity quota configuration
+// QuantityQuotaConfig quantity quota configuration
 type QuantityQuotaConfig struct {
 	//limits the max total quantity value
 	Value int `json:"value,omitempty"`
@@ -368,7 +386,7 @@ func (q *QuotaConfig) IsEqual(q2 *QuotaConfig) bool {
 
 // NamespaceBucketInfo is the information needed for creating namespace bucket
 type NamespaceBucketInfo struct {
-	WriteResource NamespaceResourceFullConfig   `json:"write_resource"`
+	WriteResource NamespaceResourceFullConfig   `json:"write_resource,omitempty"`
 	ReadResources []NamespaceResourceFullConfig `json:"read_resources,omitempty"`
 	Caching       *CacheSpec                    `json:"caching,omitempty"`
 }
@@ -391,23 +409,17 @@ type BucketClaimInfo struct {
 	Namespace   string `json:"namespace,omitempty"`
 }
 
-// AccountAllowedBuckets is part of CreateAccountParams
-type AccountAllowedBuckets struct {
-	FullPermission bool     `json:"full_permission"`
-	PermissionList []string `json:"permission_list"`
-}
-
 // CreateAccountParams is the params of account_api.create_account()
 type CreateAccountParams struct {
-    Name              string                    `json:"name"`
-    Email             string                    `json:"email"`
-    HasLogin          bool                      `json:"has_login"`
-    S3Access          bool                      `json:"s3_access"`
-    AllowBucketCreate bool                      `json:"allow_bucket_creation"`
-    AllowedBuckets    AccountAllowedBuckets     `json:"allowed_buckets"`
-    DefaultResource   string                    `json:"default_resource,omitempty"`
-    BucketClaimOwner  string                    `json:"bucket_claim_owner,omitempty"`
-    NsfsAccountConfig *nbv1.AccountNsfsConfig   `json:"nsfs_account_config,omitempty"`
+	Name              string                  `json:"name"`
+	Email             string                  `json:"email"`
+	HasLogin          bool                    `json:"has_login"`
+	S3Access          bool                    `json:"s3_access"`
+	AllowBucketCreate bool                    `json:"allow_bucket_creation"`
+	DefaultResource   string                  `json:"default_resource,omitempty"`
+	ForceMd5Etag      *bool                   `json:"force_md5_etag,omitempty"`
+	BucketClaimOwner  string                  `json:"bucket_claim_owner,omitempty"`
+	NsfsAccountConfig *nbv1.AccountNsfsConfig `json:"nsfs_account_config,omitempty"`
 }
 
 // CreateAccountReply is the reply of account_api.create_account()
@@ -418,7 +430,13 @@ type CreateAccountReply struct {
 
 // GenerateAccountKeysParams is the params of account_api.generate_account_keys()
 type GenerateAccountKeysParams struct {
-	Email             string                `json:"email"`
+	Email string `json:"email"`
+}
+
+// UpdateAccountKeysParams is the params of account_api.update_account_keys()
+type UpdateAccountKeysParams struct {
+	Email      string       `json:"email"`
+	AccessKeys S3AccessKeys `json:"access_keys"`
 }
 
 // ResetPasswordParams is the params of account_api.reset_password()
@@ -485,9 +503,20 @@ type CreateNamespaceResourceParams struct {
 	Name           string              `json:"name"`
 	Connection     string              `json:"connection"`
 	TargetBucket   string              `json:"target_bucket"`
+	AccessMode     APIAccessModeType   `json:"access_mode"`
 	NSFSConfig     *NSFSConfig         `json:"nsfs_config,omitempty"`
 	NamespaceStore *NamespaceStoreInfo `json:"namespace_store,omitempty"`
 }
+
+// APIAccessModeType is the type of all the optional access modes
+type APIAccessModeType = string
+
+const (
+	// APIAccessModeReadWrite is the read-write access mode
+	APIAccessModeReadWrite APIAccessModeType = "READ_WRITE"
+	// APIAccessModeReadOnly is the read-only access mode
+	APIAccessModeReadOnly APIAccessModeType = "READ_ONLY"
+)
 
 // NSFSConfig is the namespace fs config needed for creating namespace resource of type fs()
 type NSFSConfig struct {
@@ -554,14 +583,27 @@ type DeleteNamespaceResourceParams struct {
 	Name string `json:"name"`
 }
 
+// UpdateAccountParams is the params of account_api.update_account_s3_access()
+type UpdateAccountParams struct {
+	Name                *string                  `json:"username,omitempty"`
+	Email               string                   `json:"email"`
+	NewEmail            *string                  `json:"new_email,omitempty"`
+	AllowedIPs          *[]struct {
+		Start   string `json:"start"`
+		End     string `json:"end"`
+	} `json:"ips,omitempty"`
+	RoleConfig          interface{}              `json:"role_config,omitempty"`
+	RemoveRoleConfig    bool                     `json:"remove_role_config,omitempty"`
+}
+
 // UpdateAccountS3AccessParams is the params of account_api.update_account_s3_access()
 type UpdateAccountS3AccessParams struct {
-    Email               string                  `json:"email"`
-    S3Access            bool                    `json:"s3_access"`
-    DefaultResource     *string                 `json:"default_resource,omitempty"`
-    AllowBucketCreation *bool                   `json:"allow_bucket_creation,omitempty"`
-    AllowBuckets        *AllowedBuckets         `json:"allowed_buckets,omitempty"`
-    NsfsAccountConfig   *nbv1.AccountNsfsConfig `json:"nsfs_account_config,omitempty"`
+	Email               string                  `json:"email"`
+	S3Access            bool                    `json:"s3_access"`
+	DefaultResource     *string                 `json:"default_resource,omitempty"`
+	ForceMd5Etag        *bool                   `json:"force_md5_etag,omitempty"`
+	AllowBucketCreation *bool                   `json:"allow_bucket_creation,omitempty"`
+	NsfsAccountConfig   *nbv1.AccountNsfsConfig `json:"nsfs_account_config,omitempty"`
 }
 
 // UpdateDefaultResourceParams is the params of bucket_api.update_all_buckets_default_pool()
@@ -578,8 +620,14 @@ type UpdateBucketClassParams struct {
 
 // BucketReplicationParams is the params of bucket_api.put_bucket_replication()
 type BucketReplicationParams struct {
-	Name              string        `json:"name"`
-	ReplicationPolicy []interface{} `json:"replication_policy"`
+	Name              string            `json:"name"`
+	ReplicationPolicy ReplicationPolicy `json:"replication_policy"`
+}
+
+// ReplicationPolicy is the struct representing replication configuration
+type ReplicationPolicy struct {
+	Rules              []interface{} `json:"rules,omitempty"`
+	LogReplicationInfo interface{}   `json:"log_replication_info,omitempty"`
 }
 
 // DeleteBucketReplicationParams is the params of bucket_api.delete_bucket_replication()
@@ -592,12 +640,6 @@ type BucketClassInfo struct {
 	ErrorMessage   string                  `json:"error_message"`
 	ShouldRevert   bool                    `json:"should_revert"`
 	RevertToPolicy UpdateBucketClassParams `json:"revert_to_policy"`
-}
-
-// AllowedBuckets is a struct for setting which buckets an account can access
-type AllowedBuckets struct {
-	FullPermission bool     `json:"full_permission"`
-	PermissionList []string `json:"permission_list"`
 }
 
 // CloudAuthMethod is an enum
@@ -658,16 +700,39 @@ type ExternalConnectionInfo struct {
 	} `json:"usage"`
 }
 
+// AzureLogAccessKeysParams is used to map between the Azure secret CR fields and the API ones
+type AzureLogAccessKeysParams struct {
+	AzureTenantID                 string `json:"azure_tenant_id"`
+	AzureClientID                 string `json:"azure_client_id"`
+	AzureClientSecret             string `json:"azure_client_secret"`
+	AzureLogsAnalyticsWorkspaceID string `json:"azure_logs_analytics_workspace_id"`
+}
+
 // AddExternalConnectionParams is the params of account_api.add_external_connection()
 type AddExternalConnectionParams struct {
-	Name         string          `json:"name"`
-	EndpointType EndpointType    `json:"endpoint_type"`
-	Endpoint     string          `json:"endpoint"`
-	Identity     string          `json:"identity"`
-	Secret       string          `json:"secret"`
-	AuthMethod   CloudAuthMethod `json:"auth_method,omitempty"`
-	AWSSTSARN    string          `json:"aws_sts_arn,omitempty"`
-	Region       string          `json:"region,omitempty"`
+	Name               string                    `json:"name"`
+	EndpointType       EndpointType              `json:"endpoint_type"`
+	Endpoint           string                    `json:"endpoint"`
+	Identity           MaskedString              `json:"identity"`
+	Secret             MaskedString              `json:"secret"`
+	AuthMethod         CloudAuthMethod           `json:"auth_method,omitempty"`
+	AWSSTSARN          string                    `json:"aws_sts_arn,omitempty"`
+	Region             string                    `json:"region,omitempty"`
+	AzureLogAccessKeys *AzureLogAccessKeysParams `json:"azure_log_access_keys,omitempty"`
+}
+
+// CheckExternalConnectionParams is the params of account_api.check_external_connection()
+type CheckExternalConnectionParams struct {
+	Name                   string                    `json:"name"`
+	EndpointType           EndpointType              `json:"endpoint_type"`
+	Endpoint               string                    `json:"endpoint"`
+	Identity               MaskedString              `json:"identity"`
+	Secret                 MaskedString              `json:"secret"`
+	AuthMethod             CloudAuthMethod           `json:"auth_method,omitempty"`
+	AWSSTSARN              string                    `json:"aws_sts_arn,omitempty"`
+	IgnoreNameAlreadyExist bool                      `json:"ignore_name_already_exist,omitempty"`
+	AzureLogAccessKeys     *AzureLogAccessKeysParams `json:"azure_log_access_keys,omitempty"`
+	Region                 string                    `json:"region,omitempty"`
 }
 
 // CheckExternalConnectionReply is the reply of account_api.check_external_connection()
@@ -679,11 +744,13 @@ type CheckExternalConnectionReply struct {
 	} `json:"error,omitempty"`
 }
 
-// EditExternalConnectionCredentialsParams is the params of account_api.edit_external_connection_credentials()
-type EditExternalConnectionCredentialsParams struct {
-	Name     string `json:"name"`
-	Identity string `json:"identity"`
-	Secret   string `json:"secret"`
+// UpdateExternalConnectionParams is the params of account_api.update_external_connection()
+type UpdateExternalConnectionParams struct {
+	Name               string                    `json:"name"`
+	Identity           MaskedString              `json:"identity"`
+	Secret             MaskedString              `json:"secret"`
+	AzureLogAccessKeys *AzureLogAccessKeysParams `json:"azure_log_access_keys,omitempty"`
+	Region             string                    `json:"region,omitempty"`
 }
 
 // DeleteExternalConnectionParams is the params of account_api.delete_external_connection()
@@ -703,6 +770,20 @@ type UpdateEndpointGroupParams struct {
 	IsRemote      bool     `json:"is_remote"`
 	Region        string   `json:"region"`
 	EndpointRange IntRange `json:"endpoint_range"`
+}
+
+// SetDebugLevelParams - params for debug_api.set_debug_level
+type SetDebugLevelParams struct {
+	Module string `json:"module"`
+	Level  int    `json:"level"`
+}
+
+// PublishToClusterParams are the parmas for redirector_api.publish_to_cluster
+type PublishToClusterParams struct {
+	Target        string      `json:"target"`
+	MethodAPI     string      `json:"method_api"`
+	MethodName    string      `json:"method_name"`
+	RequestParams interface{} `json:"request_params"`
 }
 
 // BigIntToHumanBytes returns a human readable bytes string

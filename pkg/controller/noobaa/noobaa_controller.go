@@ -26,11 +26,11 @@ import (
 
 // NotificationSource specifies a queue of notifications
 type NotificationSource struct {
-	Queue workqueue.RateLimitingInterface
+	Queue workqueue.TypedRateLimitingInterface[reconcile.Request]
 }
 
 // Start will setup s.Queue field
-func (s *NotificationSource) Start(context context.Context, handler handler.EventHandler, q workqueue.RateLimitingInterface, predicates ...predicate.Predicate) error {
+func (s *NotificationSource) Start(context context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 	s.Queue = q
 	return nil
 }
@@ -52,6 +52,7 @@ func Add(mgr manager.Manager) error {
 					mgr.GetEventRecorderFor("noobaa-operator"),
 				).Reconcile()
 			}),
+		SkipNameValidation: &[]bool{true}[0],
 	})
 	if err != nil {
 		return err
@@ -75,56 +76,61 @@ func Add(mgr manager.Manager) error {
 	)
 
 	// Watch for changes on resources to trigger reconcile
-	ownerHandler := &handler.EnqueueRequestForOwner{IsController: true, OwnerType: &nbv1.NooBaa{}}
+	ownerHandler := handler.EnqueueRequestForOwner(
+		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
+		&nbv1.NooBaa{},
+		handler.OnlyControllerOwner(),
+	)
 
-	err = c.Watch(&source.Kind{Type: &nbv1.NooBaa{}}, &handler.EnqueueRequestForObject{},
-		noobaaPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &nbv1.NooBaa{}, &handler.EnqueueRequestForObject{},
+		noobaaPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &appsv1.StatefulSet{}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.Service{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &corev1.Service{}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &corev1.Pod{}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &appsv1.Deployment{}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
-	err = c.Watch(&source.Kind{Type: &corev1.ConfigMap{}}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &corev1.ConfigMap{}, ownerHandler, &filterForOwnerPredicate, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
 
-	storageClassHandler := handler.EnqueueRequestsFromMapFunc(func(mo client.Object) []reconcile.Request {
-			sc, ok := mo.(*storagev1.StorageClass)
-			if !ok || sc.Provisioner != options.ObjectBucketProvisionerName() {
-				return nil
-			}
-			return []reconcile.Request{{
-				NamespacedName: types.NamespacedName{
-					Name:      options.SystemName,
-					Namespace: options.Namespace,
-				},
-			}}
-		},
+	storageClassHandler := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, mo client.Object) []reconcile.Request {
+		sc, ok := mo.(*storagev1.StorageClass)
+		if !ok || sc.Provisioner != options.ObjectBucketProvisionerName() {
+			return nil
+		}
+		return []reconcile.Request{{
+			NamespacedName: types.NamespacedName{
+				Name:      options.SystemName,
+				Namespace: options.Namespace,
+			},
+		}}
+	},
 	)
 
 	// Watch for StorageClass changes to trigger reconcile and recreate it when deleted
-	err = c.Watch(&source.Kind{Type: &storagev1.StorageClass{}}, storageClassHandler, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &storagev1.StorageClass{}, storageClassHandler, &logEventsPredicate))
 	if err != nil {
 		return err
 	}
 	// watch on notificationSource in order to keep the controller work queue
 	notificationSource := &NotificationSource{}
-	err = c.Watch(notificationSource, nil)
+	err = c.Watch(notificationSource)
 	if err != nil {
 		return err
 	}

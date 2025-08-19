@@ -21,7 +21,8 @@ spec:
       annotations:
         noobaa.io/configmap-hash: ""
     spec:
-      serviceAccountName: noobaa
+      # Notice that changing the serviceAccountName would need to update existing AWS STS role trust policy for customers
+      serviceAccountName: noobaa-core
       volumes:
         - name: logs
           emptyDir: {}
@@ -29,22 +30,32 @@ spec:
           secret:
             secretName: noobaa-mgmt-serving-cert
             optional: true
-        - name: s3-secret
+        - name: noobaa-server
           secret:
-            secretName: noobaa-s3-serving-cert
+            secretName: noobaa-server
             optional: true
-        - name: oidc-token
+        # This service account token can be used to provide identity outside the cluster.
+        # For example, this token can be used with AssumeRoleWithWebIdentity to authenticate with AWS using IAM OIDC provider and STS.
+        - name: bound-sa-token
           projected:
             sources:
-            - serviceAccountToken:
-                path: oidc-token
-                expirationSeconds: 3600
-                audience: api
+              - serviceAccountToken:
+                  path: token
+                  # For testing purposes change the audience to api
+                  audience: openshift
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 0
       containers:
         #----------------#
         # CORE CONTAINER #
         #----------------#
         - name: core
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            timeoutSeconds: 2
           image: NOOBAA_CORE_IMAGE
           volumeMounts:
             - name: logs
@@ -52,11 +63,11 @@ spec:
             - name: mgmt-secret
               mountPath: /etc/mgmt-secret
               readOnly: true
-            - name: s3-secret
-              mountPath: /etc/s3-secret
+            - name: noobaa-server
+              mountPath: /etc/noobaa-server
               readOnly: true
-            - mountPath: /var/run/secrets/openshift/serviceaccount
-              name: oidc-token
+            - name: bound-sa-token
+              mountPath: /var/run/secrets/openshift/serviceaccount
               readOnly: true
           resources:
             requests:
@@ -88,29 +99,42 @@ spec:
                 configMapKeyRef:
                   name: noobaa-config
                   key: NOOBAA_LOG_LEVEL
-            - name: MONGODB_URL
-              value: "mongodb://noobaa-db-0.noobaa-db/nbcore"
+            - name: RESTRICT_RESOURCE_DELETION
+              value: "false"
+            - name: NOOBAA_LOG_COLOR
+              valueFrom:
+                configMapKeyRef:
+                  name: noobaa-config
+                  key: NOOBAA_LOG_COLOR
+            - name: NOOBAA_METRICS_AUTH_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: noobaa-config
+                  key: NOOBAA_METRICS_AUTH_ENABLED
+            - name: NOOBAA_VERSION_AUTH_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: noobaa-config
+                  key: NOOBAA_VERSION_AUTH_ENABLED
             - name: POSTGRES_HOST
               value: "noobaa-db-pg-0.noobaa-db-pg"
+            - name: POSTGRES_PORT
             - name: POSTGRES_DBNAME
-              value: nbcore
             - name: POSTGRES_USER
             - name: POSTGRES_PASSWORD
+            - name: POSTGRES_CONNECTION_STRING
+            - name: POSTGRES_SSL_REQUIRED
+            - name: POSTGRES_SSL_UNAUTHORIZED
+            - name: POSTGRES_HOST_PATH
+            - name: POSTGRES_USER_PATH
+            - name: POSTGRES_PASSWORD_PATH
+            - name: POSTGRES_DBNAME_PATH
+            - name: POSTGRES_PORT_PATH
+            - name: GUARANTEED_LOGS_PATH
             - name: DB_TYPE
-              value: mongodb
+              value: postgres
             - name: CONTAINER_PLATFORM
               value: KUBERNETES
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: noobaa-server
-                  key: jwt
-            - name: SERVER_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: noobaa-server
-                  key: server_secret
-            - name: NOOBAA_ROOT_SECRET
             - name: NODE_EXTRA_CA_CERTS
             - name: AGENT_PROFILE
               value: VALUE_AGENT_PROFILE
@@ -122,6 +146,45 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.serviceAccountName
+            - name: CONTAINER_CPU_REQUEST
+              valueFrom:
+                resourceFieldRef:
+                  resource: requests.cpu
+            - name: CONTAINER_MEM_REQUEST
+              valueFrom:
+                resourceFieldRef:
+                  resource: requests.memory
+            - name: CONTAINER_CPU_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+            - name: CONTAINER_MEM_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+        - name: noobaa-log-processor
+          image: NOOBAA_CORE_IMAGE
+          command:
+            [
+              "/root/node_modules/noobaa-core/src/deploy/NVA_build/noobaa_logs.sh",
+            ]
+          volumeMounts:
+            - name: logs
+              mountPath: /log
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "500Mi"
+            limits:
+              cpu: "200m"
+              memory: "500Mi"
+          ports:
+            - containerPort: 5140
+            - containerPort: 6514
+          env:
             - name: CONTAINER_CPU_REQUEST
               valueFrom:
                 resourceFieldRef:

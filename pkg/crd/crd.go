@@ -1,6 +1,7 @@
 package crd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/printers"
 )
+
+var ctx = context.TODO()
 
 // CRD is just an alias for a long name
 type CRD = apiextv1.CustomResourceDefinition
@@ -107,6 +110,11 @@ func RunCreate(cmd *cobra.Command, args []string) {
 	ForEachCRD(CreateCRD)
 }
 
+// RunUpgrade runs a CLI command
+func RunUpgrade(cmd *cobra.Command, args []string) {
+	ForEachCRD(UpgradeCRD)
+}
+
 // RunDelete runs a CLI command
 func RunDelete(cmd *cobra.Command, args []string) {
 	ForEachCRD(DeleteCRD)
@@ -131,11 +139,11 @@ func RunYaml(cmd *cobra.Command, args []string) {
 
 // LoadCrds loads the CRDs structures from the bundled yamls
 func LoadCrds() *Crds {
-	o1 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaas_crd_yaml)
-	o2 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_backingstores_crd_yaml)
-	o3 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_namespacestores_crd_yaml)
-	o4 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_bucketclasses_crd_yaml)
-	o5 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaaaccounts_crd_yaml)
+	o1 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaas_yaml)
+	o2 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_backingstores_yaml)
+	o3 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_namespacestores_yaml)
+	o4 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_bucketclasses_yaml)
+	o5 := util.KubeObject(bundle.File_deploy_crds_noobaa_io_noobaaaccounts_yaml)
 	o6 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbucketclaims_crd_yaml)
 	o7 := util.KubeObject(bundle.File_deploy_obc_objectbucket_io_objectbuckets_crd_yaml)
 	crds := &Crds{
@@ -172,6 +180,11 @@ func CreateCRD(crd *CRD) {
 	util.KubeCreateSkipExisting(crd)
 }
 
+// UpgradeCRD Kubernetesically applies a CRD (create if doesn't exist, update otherwise)
+func UpgradeCRD(crd *CRD) {
+	util.KubeApply(crd)
+}
+
 // DeleteCRD deletes a CRD
 func DeleteCRD(crd *CRD) {
 	util.KubeDelete(crd)
@@ -193,8 +206,9 @@ func WaitAllReady() {
 	log := util.Logger()
 	klient := util.KubeClient()
 	crds := LoadCrds()
-	intervalSec := time.Duration(3)
-	util.Panic(wait.PollImmediateInfinite(intervalSec*time.Second, func() (bool, error) {
+	interval := time.Duration(3)
+
+	util.Panic(wait.PollUntilContextCancel(ctx, interval*time.Second, true, func(ctx context.Context) (bool, error) {
 		allReady := true
 		for _, crd := range crds.All {
 			err := klient.Get(util.Context(), client.ObjectKey{Name: crd.Name}, crd)

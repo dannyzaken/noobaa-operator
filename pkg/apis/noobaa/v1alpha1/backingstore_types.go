@@ -7,7 +7,7 @@ import (
 	conditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
 )
 
-// Note 1: Run "operator-sdk generate k8s" to regenerate code after modifying this file
+// Note 1: Run "make gen-api" to regenerate code after modifying this file
 // Note 2: Add custom validation using kubebuilder tags: https://book.kubebuilder.io/reference/generating-crd.html
 
 func init() {
@@ -159,6 +159,7 @@ type AWSS3Spec struct {
 	// +optional
 	SSLDisabled bool `json:"sslDisabled,omitempty"`
 
+	// AWSSTSRoleARN allows to Assume Role and use AssumeRoleWithWebIdentity
 	// +optional
 	AWSSTSRoleARN *string `json:"awsSTSRoleARN,omitempty"`
 }
@@ -231,7 +232,7 @@ type PVPoolSpec struct {
 	NumVolumes int `json:"numVolumes"`
 
 	// VolumeResources represents the minimum resources each volume should have.
-	VolumeResources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	VolumeResources *corev1.VolumeResourceRequirements `json:"resources,omitempty"`
 
 	// Secret refers to a secret that provides the agent configuration
 	// The secret should define AGENT_CONFIG containing agent_configuration from noobaa-core.

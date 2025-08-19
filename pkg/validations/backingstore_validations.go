@@ -261,8 +261,13 @@ func ValidateTargetBSBucketChange(bs nbv1.BackingStore, oldBs nbv1.BackingStore)
 func ValidateBackingstoreDeletion(bs nbv1.BackingStore, systemInfo nb.SystemInfo) error {
 	for _, pool := range systemInfo.Pools {
 		if pool.Name == bs.Name {
-			if pool.Undeletable == "IS_BACKINGSTORE" || pool.Undeletable == "BEING_DELETED" {
+			switch pool.Undeletable {
+			case "IS_BACKINGSTORE", "BEING_DELETED":
 				return nil
+			case "CONNECTED_BUCKET_DELETING":
+				return util.ValidationError{
+					Msg: fmt.Sprintf("cannot complete because objects in Backingstore %q are still being deleted, Please try later", pool.Name),
+				}
 			}
 			return util.ValidationError{
 				Msg: fmt.Sprintf("cannot complete because pool %q in %q state", pool.Name, pool.Undeletable),

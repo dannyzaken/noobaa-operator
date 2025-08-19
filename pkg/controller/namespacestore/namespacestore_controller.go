@@ -6,7 +6,10 @@ import (
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
 	"github.com/noobaa/noobaa-operator/v5/pkg/namespacestore"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -33,6 +36,7 @@ func Add(mgr manager.Manager) error {
 					mgr.GetEventRecorderFor("noobaa-operator"),
 				).Reconcile()
 			}),
+		SkipNameValidation: &[]bool{true}[0],
 	})
 	if err != nil {
 		return err
@@ -49,8 +53,19 @@ func Add(mgr manager.Manager) error {
 		util.FinalizersChangedPredicate{},
 		namespaceStoreModeChangedPredicate{},
 	)
-	err = c.Watch(&source.Kind{Type: &nbv1.NamespaceStore{}}, &handler.EnqueueRequestForObject{},
-		namespaceStorePredicate, &logEventsPredicate)
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &nbv1.NamespaceStore{}, &handler.EnqueueRequestForObject{},
+		namespaceStorePredicate, &logEventsPredicate))
+	if err != nil {
+		return err
+	}
+
+	secretsHandler := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		return namespacestore.MapSecretToNamespaceStores(types.NamespacedName{
+			Name:      obj.GetName(),
+			Namespace: obj.GetNamespace(),
+		})
+	})
+	err = c.Watch(source.Kind[client.Object](mgr.GetCache(), &corev1.Secret{}, secretsHandler, logEventsPredicate))
 	if err != nil {
 		return err
 	}

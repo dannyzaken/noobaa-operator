@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
@@ -24,6 +25,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+const (
+	strTrue string = "true"
+)
+
 // Reconciler is the context for loading or reconciling a noobaa system
 type Reconciler struct {
 	Request  types.NamespacedName
@@ -33,14 +38,14 @@ type Reconciler struct {
 	Logger   *logrus.Entry
 	Recorder record.EventRecorder
 
-	NBClient   nb.Client
-	SystemInfo *nb.SystemInfo
+	NBClient          nb.Client
+	SystemInfo        *nb.SystemInfo
 	NooBaaAccountInfo *nb.AccountInfo
 
 	NooBaaAccount *nbv1.NooBaaAccount
-	NooBaa      *nbv1.NooBaa
+	NooBaa        *nbv1.NooBaa
 
-	Secret   *corev1.Secret
+	Secret *corev1.Secret
 }
 
 // NewReconciler initializes a reconciler to be used for loading or reconciling a noobaa account
@@ -52,15 +57,15 @@ func NewReconciler(
 ) *Reconciler {
 
 	r := &Reconciler{
-		Request:     req,
-		Client:      client,
-		Scheme:      scheme,
-		Recorder:    recorder,
-		Ctx:         context.TODO(),
-		Logger:      logrus.WithField("noobaaaccount", req.Namespace+"/"+req.Name),
-		NooBaaAccount:  util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaaaccount_cr_yaml).(*nbv1.NooBaaAccount),
-		NooBaa:      util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaa_cr_yaml).(*nbv1.NooBaa),
-		Secret:      util.KubeObject(bundle.File_deploy_internal_secret_empty_yaml).(*corev1.Secret),
+		Request:       req,
+		Client:        client,
+		Scheme:        scheme,
+		Recorder:      recorder,
+		Ctx:           context.TODO(),
+		Logger:        logrus.WithField("noobaaaccount", req.Namespace+"/"+req.Name),
+		NooBaaAccount: util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaaaccount_cr_yaml).(*nbv1.NooBaaAccount),
+		NooBaa:        util.KubeObject(bundle.File_deploy_crds_noobaa_io_v1alpha1_noobaa_cr_yaml).(*nbv1.NooBaa),
+		Secret:        util.KubeObject(bundle.File_deploy_internal_secret_empty_yaml).(*corev1.Secret),
 	}
 
 	// Set Namespace
@@ -212,11 +217,11 @@ func (r *Reconciler) ReconcilePhaseVerifying() error {
 	}
 
 	if r.NooBaaAccount.Spec.DefaultResource != "" {
-		isResourceBackingStore := checkResourceBackingStore(r.NooBaaAccount.Spec.DefaultResource) 
+		isResourceBackingStore := checkResourceBackingStore(r.NooBaaAccount.Spec.DefaultResource)
 		isResourceNamespaceStore := checkResourceNamespaceStore(r.NooBaaAccount.Spec.DefaultResource)
 		if !isResourceBackingStore && !isResourceNamespaceStore {
 			return util.NewPersistentError("MissingDefaultResource",
-				fmt.Sprintf("Account %q is allowed to create buckets, but resource %q was not found", 
+				fmt.Sprintf("Account %q is allowed to create buckets, but resource %q was not found",
 					r.NooBaaAccount.Name, r.NooBaaAccount.Spec.DefaultResource))
 		} else if isResourceBackingStore && isResourceNamespaceStore {
 			return util.NewPersistentError("MissingDefaultResource",
@@ -291,7 +296,7 @@ func (r *Reconciler) ReconcileDeletion() error {
 		r.Logger.Infof("NooBaaAccount %q remove finalizer because NooBaa system is already deleted", r.NooBaaAccount.Name)
 		return r.FinalizeDeletion()
 	}
-	
+
 	sysClient, err := system.Connect(false)
 	if err != nil {
 		return err
@@ -333,11 +338,8 @@ func (r *Reconciler) CreateNooBaaAccount() error {
 		DefaultResource:   r.NooBaaAccount.Spec.DefaultResource,
 		HasLogin:          false,
 		S3Access:          true,
+		ForceMd5Etag:      r.NooBaaAccount.Spec.ForceMd5Etag,
 		AllowBucketCreate: r.NooBaaAccount.Spec.AllowBucketCreate,
-		AllowedBuckets: nb.AccountAllowedBuckets{
-			FullPermission: r.NooBaaAccount.Spec.AllowedBuckets.FullPermission,
-			PermissionList: r.NooBaaAccount.Spec.AllowedBuckets.PermissionList,
-		},
 	}
 
 	if r.NooBaaAccount.Spec.NsfsAccountConfig != nil {
@@ -351,25 +353,46 @@ func (r *Reconciler) CreateNooBaaAccount() error {
 
 	accountInfo, err := r.NBClient.CreateAccountAPI(createAccountParams)
 	if err != nil {
-		return err
+		return util.NewPersistentError("InvalidCreateAccountParams",
+			fmt.Sprintf("%v", err.Error()))
 	}
 
-	var accessKeys nb.S3AccessKeys
-	// if we didn't get the access keys in the create_account reply we might be talking to an older noobaa version (prior to 5.1)
-	// in that case try to get it using read account
-	if len(accountInfo.AccessKeys) == 0 {
-		log.Info("CreateAccountAPI did not return access keys. calling ReadAccountAPI to get keys..")
-		readAccountReply, err := r.NBClient.ReadAccountAPI(nb.ReadAccountParams{Email: r.NooBaaAccount.Name})
-		if err != nil {
-			return err
+	annotationValue, exists := util.GetAnnotationValue(r.NooBaaAccount.Annotations, "remote-operator")
+	if exists {
+		if strings.ToLower(annotationValue) == strTrue {
+			// create join secret conatining auth token for remote noobaa account
+			res, err := r.NBClient.CreateAuthAPI(nb.CreateAuthParams{
+				System: r.NooBaa.Name,
+				Role:   "operator",
+				Email:  options.OperatorAccountEmail,
+			})
+			if err != nil {
+				return fmt.Errorf("cannot create an auth token for remote operator, error: %v", err)
+			}
+			accessKeys := accountInfo.AccessKeys[0]
+			r.Secret.StringData["auth_token"] = res.Token
+			r.Secret.StringData["AWS_ACCESS_KEY_ID"] = string(accessKeys.AccessKey)
+			r.Secret.StringData["AWS_SECRET_ACCESS_KEY"] = string(accessKeys.SecretKey)
+
 		}
-		accessKeys = readAccountReply.AccessKeys[0]
 	} else {
-		accessKeys = accountInfo.AccessKeys[0]
+		var accessKeys nb.S3AccessKeys
+		// if we didn't get the access keys in the create_account reply we might be talking to an older noobaa version (prior to 5.1)
+		// in that case try to get it using read account
+		if len(accountInfo.AccessKeys) == 0 {
+			log.Info("CreateAccountAPI did not return access keys. calling ReadAccountAPI to get keys..")
+			readAccountReply, err := r.NBClient.ReadAccountAPI(nb.ReadAccountParams{Email: r.NooBaaAccount.Name})
+			if err != nil {
+				return err
+			}
+			accessKeys = readAccountReply.AccessKeys[0]
+		} else {
+			accessKeys = accountInfo.AccessKeys[0]
+		}
+		r.Secret.StringData = map[string]string{}
+		r.Secret.StringData["AWS_ACCESS_KEY_ID"] = string(accessKeys.AccessKey)
+		r.Secret.StringData["AWS_SECRET_ACCESS_KEY"] = string(accessKeys.SecretKey)
 	}
-	r.Secret.StringData = map[string]string{}
-	r.Secret.StringData["AWS_ACCESS_KEY_ID"] = accessKeys.AccessKey
-	r.Secret.StringData["AWS_SECRET_ACCESS_KEY"] = accessKeys.SecretKey
 	r.Own(r.Secret)
 	err = r.Client.Create(r.Ctx, r.Secret)
 	if err != nil {
@@ -392,16 +415,13 @@ func (r *Reconciler) UpdateNooBaaAccount() error {
 	if r.needUpdate() {
 
 		updateAccountS3AccessParams := nb.UpdateAccountS3AccessParams{
-			Email:             r.NooBaaAccount.Name,
-			DefaultResource:   &r.NooBaaAccount.Spec.DefaultResource,
-			S3Access:          true,
+			Email:               r.NooBaaAccount.Name,
+			DefaultResource:     &r.NooBaaAccount.Spec.DefaultResource,
+			S3Access:            true,
+			ForceMd5Etag:        r.NooBaaAccount.Spec.ForceMd5Etag,
 			AllowBucketCreation: &r.NooBaaAccount.Spec.AllowBucketCreate,
-			AllowBuckets: &nb.AllowedBuckets{
-				FullPermission: r.NooBaaAccount.Spec.AllowedBuckets.FullPermission,
-				PermissionList: r.NooBaaAccount.Spec.AllowedBuckets.PermissionList,
-			},
 		}
-	
+
 		if r.NooBaaAccount.Spec.NsfsAccountConfig != nil {
 			updateAccountS3AccessParams.NsfsAccountConfig = &nbv1.AccountNsfsConfig{
 				UID:            r.NooBaaAccount.Spec.NsfsAccountConfig.UID,
@@ -413,7 +433,8 @@ func (r *Reconciler) UpdateNooBaaAccount() error {
 
 		err := r.NBClient.UpdateAccountS3Access(updateAccountS3AccessParams)
 		if err != nil {
-			return err
+			return util.NewPersistentError("InvalidUpdateAccountS3AccessParams",
+				fmt.Sprintf("%v", err.Error()))
 		}
 		log.Infof("✅ Successfully updated account %q", r.NooBaaAccount.Name)
 	}
@@ -423,12 +444,9 @@ func (r *Reconciler) UpdateNooBaaAccount() error {
 
 func (r *Reconciler) needUpdate() bool {
 	return r.NooBaaAccount.Spec.AllowBucketCreate != r.NooBaaAccountInfo.CanCreateBuckets ||
-		r.NooBaaAccount.Spec.AllowedBuckets.FullPermission != r.NooBaaAccountInfo.AllowedBuckets.FullPermission ||
-		r.NooBaaAccount.Spec.DefaultResource != r.NooBaaAccountInfo.DefaultResource || 
+		r.NooBaaAccount.Spec.DefaultResource != r.NooBaaAccountInfo.DefaultResource ||
 		!reflect.DeepEqual(r.NooBaaAccount.Spec.NsfsAccountConfig, r.NooBaaAccountInfo.NsfsAccountConfig) ||
-		r.NooBaaAccount.Spec.NsfsAccountConfig != nil && r.NooBaaAccountInfo.NsfsAccountConfig == nil ||
-		!util.IsStringArrayUnorderedEqual(r.NooBaaAccount.Spec.AllowedBuckets.PermissionList, 
-			r.NooBaaAccountInfo.AllowedBuckets.PermissionList)
+		r.NooBaaAccount.Spec.NsfsAccountConfig != nil && r.NooBaaAccountInfo.NsfsAccountConfig == nil
 }
 
 // ReadSystemInfo loads the information from the noobaa system api,
@@ -456,18 +474,8 @@ func (r *Reconciler) ReadSystemInfo() error {
 		}
 	}
 
-	// Check If all allowed buckets exist
-	for i := range r.NooBaaAccount.Spec.AllowedBuckets.PermissionList {
-		bucket := r.NooBaaAccount.Spec.AllowedBuckets.PermissionList[i]
-		if !IsBucketInBucketsArray(r.SystemInfo.Buckets, bucket) {
-			return util.NewPersistentError("UnknownAllowedBucket",
-			fmt.Sprintf("Account %q allowed buckets list consists a unknown bucket name %q", r.NooBaaAccount.Name, bucket))
-		}
-	}
-
 	return nil
 }
-
 
 // Own sets the object owner references to the noobaaAccount
 func (r *Reconciler) Own(obj metav1.Object) {

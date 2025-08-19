@@ -17,7 +17,6 @@ import (
 	"github.com/noobaa/noobaa-operator/v5/pkg/options"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 
-	secv1 "github.com/openshift/api/security/v1"
 	"github.com/spf13/cobra"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -101,20 +100,107 @@ func CmdRun() *cobra.Command {
 	return cmd
 }
 
+// RunUpgrade runs a CLI command
+func RunUpgrade(cmd *cobra.Command, args []string) {
+	c := LoadOperatorConf(cmd)
+	util.KubeApply(c.NS)
+	util.KubeApply(c.SA)
+	util.KubeApply(c.SACore)
+	util.KubeApply(c.SAEndpoint)
+	util.KubeApply(c.Role)
+	util.KubeApply(c.RoleCore)
+	util.KubeApply(c.RoleEndpoint)
+	util.KubeApply(c.RoleBinding)
+	util.KubeApply(c.RoleBindingCore)
+	util.KubeApply(c.RoleBindingEndpoint)
+	util.KubeApply(c.ClusterRole)
+	util.KubeApply(c.ClusterRoleBinding)
+
+	testEnv, _ := cmd.Flags().GetBool("test-env")
+	if testEnv {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "TEST_ENV",
+			Value: "true",
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+
+	admission, _ := cmd.Flags().GetBool("admission")
+	if admission {
+		LoadAdmissionConf(c)
+		AdmissionWebhookSetup(c)
+		util.KubeApply(c.WebhookConfiguration)
+		util.KubeApply(c.WebhookSecret)
+		util.KubeApply(c.WebhookService)
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "ENABLE_NOOBAA_ADMISSION",
+			Value: "true",
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+
+	AWSSTSARNEnv, _ := cmd.Flags().GetString("aws-sts-arn")
+	if AWSSTSARNEnv != "" {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "ROLEARN",
+			Value: AWSSTSARNEnv,
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+
+	noDeploy, _ := cmd.Flags().GetBool("no-deploy")
+	if !noDeploy {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(
+			operatorContainer.Env,
+			corev1.EnvVar{
+				Name:  "NOOBAA_CLI_DEPLOYMENT",
+				Value: "true",
+			},
+		)
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+		util.KubeApply(c.Deployment)
+	}
+}
+
 // RunInstall runs a CLI command
 func RunInstall(cmd *cobra.Command, args []string) {
 	c := LoadOperatorConf(cmd)
 	util.KubeCreateSkipExisting(c.NS)
 	util.KubeCreateSkipExisting(c.SA)
+	util.KubeCreateSkipExisting(c.SACore)
 	util.KubeCreateSkipExisting(c.SAEndpoint)
 	util.KubeCreateSkipExisting(c.Role)
+	util.KubeCreateSkipExisting(c.RoleCore)
 	util.KubeCreateSkipExisting(c.RoleEndpoint)
 	util.KubeCreateSkipExisting(c.RoleBinding)
+	util.KubeCreateSkipExisting(c.RoleBindingCore)
 	util.KubeCreateSkipExisting(c.RoleBindingEndpoint)
 	util.KubeCreateSkipExisting(c.ClusterRole)
 	util.KubeCreateSkipExisting(c.ClusterRoleBinding)
-	util.KubeCreateOptional(c.SecurityContextConstraints)
-	util.KubeCreateOptional(c.SCCEndpoint)
+
+	testEnv, _ := cmd.Flags().GetBool("test-env")
+	if testEnv {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "TEST_ENV",
+			Value: "true",
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+	devEnv, _ := cmd.Flags().GetBool("dev")
+	if devEnv {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "DEV_ENV",
+			Value: "true",
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+
 	admission, _ := cmd.Flags().GetBool("admission")
 	if admission {
 		LoadAdmissionConf(c)
@@ -129,15 +215,49 @@ func RunInstall(cmd *cobra.Command, args []string) {
 		})
 		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
 	}
+
+	AWSSTSARNEnv, _ := cmd.Flags().GetString("aws-sts-arn")
+	if AWSSTSARNEnv != "" {
+		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
+		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
+			Name:  "ROLEARN",
+			Value: AWSSTSARNEnv,
+		})
+		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
+	}
+
 	noDeploy, _ := cmd.Flags().GetBool("no-deploy")
 	if !noDeploy {
 		operatorContainer := c.Deployment.Spec.Template.Spec.Containers[0]
-		operatorContainer.Env = append(operatorContainer.Env, corev1.EnvVar{
-			Name:  "NOOBAA_CLI_DEPLOYMENT",
-			Value: "true",
-		})
+		operatorContainer.Env = append(
+			operatorContainer.Env,
+			corev1.EnvVar{
+				Name:  "NOOBAA_CLI_DEPLOYMENT",
+				Value: "true",
+			},
+		)
 		c.Deployment.Spec.Template.Spec.Containers[0].Env = operatorContainer.Env
 		util.KubeCreateSkipExisting(c.Deployment)
+	}
+}
+
+func waitForOperatorPodExit() {
+	for {
+		podsList := &corev1.PodList{}
+		listRes := util.KubeList(podsList, client.InNamespace(options.Namespace), client.MatchingLabels{"noobaa-operator": "deployment"})
+
+		// List failure
+		if !listRes {
+			log.Printf("❌ Can not list pods in %v namespace with noobaa-operator=deployment label, try again.", options.Namespace)
+			// Exit condition, list succeded and no operator's pods are found
+		} else if len(podsList.Items) == 0 {
+			log.Printf("✅ NooBaa operator pod is not running, continue.")
+			break
+		}
+
+		// Operator pod is still running
+		log.Printf("⏳ Waiting for the operator's pod to exit, list pods result %v, items len %v", listRes, len(podsList.Items))
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -148,28 +268,29 @@ func RunUninstall(cmd *cobra.Command, args []string) {
 	noDeploy, _ := cmd.Flags().GetBool("no-deploy")
 	if !noDeploy {
 		util.KubeDelete(c.Deployment)
-	}
-	cleanup, _ := cmd.Flags().GetBool("cleanup")
-	if !cleanup {
-		log.Printf("SCC Delete: currently disabled (enable with \"--cleanup\")")
-		log.Printf("SCC Status:")
-		util.KubeCheck(c.NS)
+		waitForOperatorPodExit()
+		util.KubeDelete(c.ClusterRoleBinding)
+		util.KubeDelete(c.ClusterRole)
+		util.KubeDelete(c.RoleBindingEndpoint)
+		util.KubeDelete(c.RoleBindingCore)
+		util.KubeDelete(c.RoleBinding)
+		util.KubeDelete(c.RoleEndpoint)
+		util.KubeDelete(c.RoleCore)
+		util.KubeDelete(c.Role)
+		util.KubeDelete(c.SAEndpoint)
+		util.KubeDelete(c.SACore)
+		util.KubeDelete(c.SA)
 	} else {
-		util.KubeDelete(c.SCCEndpoint)
-		util.KubeDelete(c.SecurityContextConstraints)
+		log.Printf("Operator Delete: currently disabled with \"--no-deploy\" flag")
+		log.Printf("Operator Deployment Status:")
+		util.KubeCheck(c.Deployment)
 	}
-	util.KubeDelete(c.ClusterRoleBinding)
-	util.KubeDelete(c.ClusterRole)
-	util.KubeDelete(c.RoleBindingEndpoint)
-	util.KubeDelete(c.RoleBinding)
-	util.KubeDelete(c.RoleEndpoint)
-	util.KubeDelete(c.Role)
-	util.KubeDelete(c.SAEndpoint)
-	util.KubeDelete(c.SA)
+
 	util.KubeDelete(c.WebhookConfiguration)
 	util.KubeDelete(c.WebhookSecret)
 	util.KubeDelete(c.WebhookService)
 
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	reservedNS := c.NS.Name == "default" ||
 		strings.HasPrefix(c.NS.Name, "openshift-") ||
 		strings.HasPrefix(c.NS.Name, "kubernetes-") ||
@@ -193,15 +314,17 @@ func RunStatus(cmd *cobra.Command, args []string) {
 	c := LoadOperatorConf(cmd)
 	LoadAdmissionConf(c)
 	util.KubeCheck(c.NS)
-	if util.KubeCheck(c.SA) && util.KubeCheck(c.SAEndpoint) {
+	if util.KubeCheck(c.SA) && util.KubeCheck(c.SAEndpoint) && util.KubeCheck(c.SACore) {
 		// in OLM deployment the roles and bindings have generated names
 		// so we list and lookup bindings to our service account to discover the actual names
 		DetectRole(c)
 		DetectClusterRole(c)
 	}
 	util.KubeCheck(c.Role)
+	util.KubeCheck(c.RoleCore)
 	util.KubeCheck(c.RoleEndpoint)
 	util.KubeCheck(c.RoleBinding)
+	util.KubeCheck(c.RoleBindingCore)
 	util.KubeCheck(c.RoleBindingEndpoint)
 	util.KubeCheck(c.ClusterRole)
 	util.KubeCheck(c.ClusterRoleBinding)
@@ -220,10 +343,13 @@ func RunYaml(cmd *cobra.Command, args []string) {
 	p := printers.YAMLPrinter{}
 	util.Panic(p.PrintObj(c.NS, os.Stdout))
 	util.Panic(p.PrintObj(c.SA, os.Stdout))
-	util.Panic(p.PrintObj(c.SAEndpoint, os.Stdout))
 	util.Panic(p.PrintObj(c.Role, os.Stdout))
-	util.Panic(p.PrintObj(c.RoleEndpoint, os.Stdout))
 	util.Panic(p.PrintObj(c.RoleBinding, os.Stdout))
+	util.Panic(p.PrintObj(c.SACore, os.Stdout))
+	util.Panic(p.PrintObj(c.SAEndpoint, os.Stdout))
+	util.Panic(p.PrintObj(c.RoleCore, os.Stdout))
+	util.Panic(p.PrintObj(c.RoleEndpoint, os.Stdout))
+	util.Panic(p.PrintObj(c.RoleBindingCore, os.Stdout))
 	util.Panic(p.PrintObj(c.RoleBindingEndpoint, os.Stdout))
 	util.Panic(p.PrintObj(c.ClusterRole, os.Stdout))
 	util.Panic(p.PrintObj(c.ClusterRoleBinding, os.Stdout))
@@ -235,23 +361,24 @@ func RunYaml(cmd *cobra.Command, args []string) {
 
 // Conf struct holds all the objects needed to install the operator
 type Conf struct {
-	NS                         *corev1.Namespace
-	SA                         *corev1.ServiceAccount
-	SAUI                       *corev1.ServiceAccount
-	SAEndpoint                 *corev1.ServiceAccount
-	Role                       *rbacv1.Role
-	RoleEndpoint               *rbacv1.Role
-	RoleUI                     *rbacv1.Role
-	RoleBinding                *rbacv1.RoleBinding
-	RoleBindingEndpoint        *rbacv1.RoleBinding
-	ClusterRole                *rbacv1.ClusterRole
-	ClusterRoleBinding         *rbacv1.ClusterRoleBinding
-	SecurityContextConstraints *secv1.SecurityContextConstraints
-	SCCEndpoint                *secv1.SecurityContextConstraints
-	Deployment                 *appsv1.Deployment
-	WebhookConfiguration       *admissionv1.ValidatingWebhookConfiguration
-	WebhookSecret              *corev1.Secret
-	WebhookService             *corev1.Service
+	NS                   *corev1.Namespace
+	SA                   *corev1.ServiceAccount
+	SAEndpoint           *corev1.ServiceAccount
+	SACore               *corev1.ServiceAccount
+	SAUI                 *corev1.ServiceAccount
+	Role                 *rbacv1.Role
+	RoleEndpoint         *rbacv1.Role
+	RoleCore             *rbacv1.Role
+	RoleUI               *rbacv1.ClusterRole
+	RoleBinding          *rbacv1.RoleBinding
+	RoleBindingEndpoint  *rbacv1.RoleBinding
+	RoleBindingCore      *rbacv1.RoleBinding
+	ClusterRole          *rbacv1.ClusterRole
+	ClusterRoleBinding   *rbacv1.ClusterRoleBinding
+	Deployment           *appsv1.Deployment
+	WebhookConfiguration *admissionv1.ValidatingWebhookConfiguration
+	WebhookSecret        *corev1.Secret
+	WebhookService       *corev1.Service
 }
 
 // LoadOperatorConf loads and initializes all the objects needed to install the operator
@@ -260,30 +387,34 @@ func LoadOperatorConf(cmd *cobra.Command) *Conf {
 
 	c.NS = util.KubeObject(bundle.File_deploy_namespace_yaml).(*corev1.Namespace)
 	c.SA = util.KubeObject(bundle.File_deploy_service_account_yaml).(*corev1.ServiceAccount)
+	c.SACore = util.KubeObject(bundle.File_deploy_service_account_core_yaml).(*corev1.ServiceAccount)
 	c.SAEndpoint = util.KubeObject(bundle.File_deploy_service_account_endpoint_yaml).(*corev1.ServiceAccount)
 	c.SAUI = util.KubeObject(bundle.File_deploy_service_account_ui_yaml).(*corev1.ServiceAccount)
 	c.Role = util.KubeObject(bundle.File_deploy_role_yaml).(*rbacv1.Role)
+	c.RoleCore = util.KubeObject(bundle.File_deploy_role_core_yaml).(*rbacv1.Role)
 	c.RoleEndpoint = util.KubeObject(bundle.File_deploy_role_endpoint_yaml).(*rbacv1.Role)
-	c.RoleUI = util.KubeObject(bundle.File_deploy_role_ui_yaml).(*rbacv1.Role)
+	c.RoleUI = util.KubeObject(bundle.File_deploy_role_ui_yaml).(*rbacv1.ClusterRole)
 	c.RoleBinding = util.KubeObject(bundle.File_deploy_role_binding_yaml).(*rbacv1.RoleBinding)
+	c.RoleBindingCore = util.KubeObject(bundle.File_deploy_role_binding_core_yaml).(*rbacv1.RoleBinding)
 	c.RoleBindingEndpoint = util.KubeObject(bundle.File_deploy_role_binding_endpoint_yaml).(*rbacv1.RoleBinding)
 	c.ClusterRole = util.KubeObject(bundle.File_deploy_cluster_role_yaml).(*rbacv1.ClusterRole)
 	c.ClusterRoleBinding = util.KubeObject(bundle.File_deploy_cluster_role_binding_yaml).(*rbacv1.ClusterRoleBinding)
-	c.SecurityContextConstraints = util.KubeObject(bundle.File_deploy_scc_yaml).(*secv1.SecurityContextConstraints)
-	c.SCCEndpoint = util.KubeObject(bundle.File_deploy_scc_endpoint_yaml).(*secv1.SecurityContextConstraints)
 	c.Deployment = util.KubeObject(bundle.File_deploy_operator_yaml).(*appsv1.Deployment)
 
 	c.NS.Name = options.Namespace
 	c.SA.Namespace = options.Namespace
 	c.SAEndpoint.Namespace = options.Namespace
+	c.SACore.Namespace = options.Namespace
 	c.Role.Namespace = options.Namespace
 	c.RoleEndpoint.Namespace = options.Namespace
+	c.RoleCore.Namespace = options.Namespace
 	c.RoleBinding.Namespace = options.Namespace
 	c.RoleBindingEndpoint.Namespace = options.Namespace
+	c.RoleBindingCore.Namespace = options.Namespace
 	c.ClusterRole.Namespace = options.Namespace
 	c.Deployment.Namespace = options.Namespace
 
-	c.ClusterRole.Name = options.SubDomainNS()
+	configureClusterRole(c.ClusterRole)
 	c.ClusterRoleBinding.Name = c.ClusterRole.Name
 	c.ClusterRoleBinding.RoleRef.Name = c.ClusterRole.Name
 	for i := range c.ClusterRoleBinding.Subjects {
@@ -295,9 +426,8 @@ func LoadOperatorConf(cmd *cobra.Command) *Conf {
 		c.Deployment.Spec.Template.Spec.ImagePullSecrets =
 			[]corev1.LocalObjectReference{{Name: options.ImagePullSecret}}
 	}
-
-	c.SecurityContextConstraints.Users[0] = fmt.Sprintf("system:serviceaccount:%s:%s", options.Namespace, c.SA.Name)
-	c.SCCEndpoint.Users[0] = fmt.Sprintf("system:serviceaccount:%s:%s", options.Namespace, c.SAEndpoint.Name)
+	// SHOULD BE RETURNED ONCE COSI IS BACK
+	// c.Deployment.Spec.Template.Spec.Containers[1].Image = options.CosiSideCarImage
 
 	return c
 }
@@ -328,6 +458,12 @@ func DetectRole(c *Conf) {
 				s.Namespace == c.SAEndpoint.Namespace {
 				c.RoleEndpoint.Name = b.RoleRef.Name
 				c.RoleBindingEndpoint.Name = b.Name
+			}
+			if s.Kind == "ServiceAccount" &&
+				s.Name == c.SACore.Name &&
+				s.Namespace == c.SACore.Namespace {
+				c.RoleCore.Name = b.RoleRef.Name
+				c.RoleBindingCore.Name = b.Name
 			}
 		}
 	}
@@ -452,16 +588,15 @@ func AdmissionWebhookSetup(c *Conf) {
 	c.WebhookSecret.Data["tls.key"] = serverPrivKeyPEM.Bytes()
 	c.WebhookConfiguration.Webhooks[0].ClientConfig.CABundle = caPEM.Bytes()
 
-	volumeMounts := make([]corev1.VolumeMount, 1)
-	volumeMounts[0] = corev1.VolumeMount{
+	volumeMount := corev1.VolumeMount{
 		Name:      "webhook-certs",
 		MountPath: "/etc/certs",
 		ReadOnly:  true,
 	}
-	c.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volumeMounts
 
-	volumes := make([]corev1.Volume, 1)
-	volumes[0] = corev1.Volume{
+	c.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts = append(c.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMount)
+
+	volume := corev1.Volume{
 		Name: "webhook-certs",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
@@ -469,5 +604,9 @@ func AdmissionWebhookSetup(c *Conf) {
 			},
 		},
 	}
-	c.Deployment.Spec.Template.Spec.Volumes = volumes
+	c.Deployment.Spec.Template.Spec.Volumes = append(c.Deployment.Spec.Template.Spec.Volumes, volume)
+}
+
+func configureClusterRole(cr *rbacv1.ClusterRole) {
+	cr.Name = options.SubDomainNS()
 }
