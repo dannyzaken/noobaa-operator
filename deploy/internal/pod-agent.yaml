@@ -45,8 +45,6 @@ spec:
   securityContext:
     runAsUser: 10001
     runAsGroup: 0
-    fsGroup: 0
-    fsGroupChangePolicy: "OnRootMismatch"
   volumes:
     - name: tmp-logs-vol
       emptyDir: {}
