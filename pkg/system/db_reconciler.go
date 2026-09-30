@@ -73,6 +73,11 @@ func (r *Reconciler) ReconcileCNPGCluster() error {
 		return err
 	}
 
+	// Handle stuck backups before checking the cluster readiness, so fencing left by a stuck backup is removed
+	// even when the cluster is not ready for another reason
+	r.reconcileStuckBackups()
+	r.cleanupOrphanBackupSnapshots()
+
 	if isClusterReady(r.CNPGCluster) {
 		r.cnpgLog("cnpg cluster is ready")
 		// update the DB status
@@ -465,6 +470,12 @@ func (r *Reconciler) reconcileDBBackup() error {
 		return err
 	}
 
+	// report the latest backups and failures
+	if err := r.reconcileBackupStatus(); err != nil {
+		r.cnpgLogError("got error reconciling backup status. error: %v", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -490,9 +501,7 @@ func (r *Reconciler) reconcileScheduledBackup() error {
 		scheduledBackup.Spec.Method = cnpgv1.BackupMethodVolumeSnapshot
 		scheduledBackup.Spec.Online = &offlineBackup
 		scheduledBackup.Spec.Target = cnpgv1.BackupTargetStandby
-		if scheduledBackup.Status.LastScheduleTime != nil {
-			r.NooBaa.Status.DBStatus.BackupStatus.LastBackupTime = scheduledBackup.Status.LastScheduleTime
-		}
+		// LastBackupTime is set by reconcileBackupStatus from the latest completed backup
 		if scheduledBackup.Status.NextScheduleTime != nil {
 			r.NooBaa.Status.DBStatus.BackupStatus.NextBackupTime = scheduledBackup.Status.NextScheduleTime
 		}
@@ -554,7 +563,7 @@ func (r *Reconciler) reconcileBackupRetention() error {
 	return nil
 }
 
-// listVolumeSnapshotsOrderByCreate lists all volume snapshots of the scheduled backup, ordered by creation timestamp
+// listVolumeSnapshotsOrderByCreate lists the ready volume snapshots of the scheduled backup, ordered by creation timestamp
 func (r *Reconciler) listVolumeSnapshotsOrderByCreate() ([]storagesnapshotv1.VolumeSnapshot, error) {
 	volumeSnapshots := storagesnapshotv1.VolumeSnapshotList{
 		TypeMeta: metav1.TypeMeta{
@@ -574,10 +583,12 @@ func (r *Reconciler) listVolumeSnapshotsOrderByCreate() ([]storagesnapshotv1.Vol
 		return nil, err
 	}
 
-	// filter the list by name. include only snapshots starting with the scheduled backup name
+	// filter the list by name. include only ready snapshots starting with the scheduled backup name.
+	// snapshots that are not ready are either in progress or orphaned (see cleanupOrphanBackupSnapshots),
+	// and must not be listed as available or count against the retention.
 	filteredItems := []storagesnapshotv1.VolumeSnapshot{}
 	for _, snapshot := range volumeSnapshots.Items {
-		if strings.HasPrefix(snapshot.Name, r.getBackupResourceName()) {
+		if strings.HasPrefix(snapshot.Name, r.getBackupResourceName()) && isSnapshotReady(&snapshot) {
 			filteredItems = append(filteredItems, snapshot)
 		}
 	}

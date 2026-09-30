@@ -668,6 +668,21 @@ type DBBackupStatus struct {
 
 	// AvailableSnapshots list of available snapshot names
 	AvailableSnapshots []string `json:"availableSnapshots,omitempty"`
+
+	// LastBackupName name of the most recently created backup
+	LastBackupName string `json:"lastBackupName,omitempty"`
+
+	// LastBackupPhase phase of the most recently created backup
+	LastBackupPhase string `json:"lastBackupPhase,omitempty"`
+
+	// LastFailedBackupName name of the most recent failed backup
+	LastFailedBackupName string `json:"lastFailedBackupName,omitempty"`
+
+	// LastFailedBackupTime timestamp of the most recent failed backup
+	LastFailedBackupTime *metav1.Time `json:"lastFailedBackupTime,omitempty"`
+
+	// LastBackupError error of the most recent failed backup
+	LastBackupError string `json:"lastBackupError,omitempty"`
 }
 
 // DBRecoveryStatus reports the status of database recovery
@@ -852,6 +867,10 @@ const (
 
 	// DisableDBDefaultMonitoring is Annotation name for disabling default db monitoring
 	DisableDBDefaultMonitoring = "noobaa.io/disable_db_default_monitoring"
+
+	// DBBackupTimeout is Annotation name for overriding the time a scheduled DB backup may run
+	// before the operator considers it stuck and cleans it up. The value is a Go duration (e.g. "20m").
+	DBBackupTimeout = "noobaa.io/db_backup_timeout"
 
 	// AlertmanagerHostOverride is Annotation name for overriding the alertmanager host, in the format https://<alertmanager-host>:<port>
 	AlertmanagerHostOverride = "noobaa.io/alertmanager_host_override"

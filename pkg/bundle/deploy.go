@@ -1518,7 +1518,7 @@ spec:
       status: {}
 `
 
-const Sha256_deploy_crds_noobaa_io_noobaas_yaml = "cf8b0283a5d8660badba7edc2cb196fb43815f7a837eab7cb86f5fbeb204e2cf"
+const Sha256_deploy_crds_noobaa_io_noobaas_yaml = "d589b90f17317922a020c0657126f5aedca4b45039ec79d6184db00dbdc5e489"
 
 const File_deploy_crds_noobaa_io_noobaas_yaml = `---
 apiVersion: apiextensions.k8s.io/v1
@@ -3664,9 +3664,30 @@ spec:
                         items:
                           type: string
                         type: array
+                      lastBackupError:
+                        description: LastBackupError error of the most recent failed
+                          backup
+                        type: string
+                      lastBackupName:
+                        description: LastBackupName name of the most recently created
+                          backup
+                        type: string
+                      lastBackupPhase:
+                        description: LastBackupPhase phase of the most recently created
+                          backup
+                        type: string
                       lastBackupTime:
                         description: LastBackupTime timestamp of the last successful
                           backup
+                        format: date-time
+                        type: string
+                      lastFailedBackupName:
+                        description: LastFailedBackupName name of the most recent
+                          failed backup
+                        type: string
+                      lastFailedBackupTime:
+                        description: LastFailedBackupTime timestamp of the most recent
+                          failed backup
                         format: date-time
                         type: string
                       nextBackupTime:
@@ -5146,7 +5167,7 @@ spec:
         secretName: AGENT_CONFIG_SECRET_NAME
 `
 
-const Sha256_deploy_internal_prometheus_rules_yaml = "e9459a8324df510af74b253ed24c155c5bacaf7b4d4ac4912b6c7863e965089e"
+const Sha256_deploy_internal_prometheus_rules_yaml = "f8fedc7f6d552717035d4c7251aaa0c4bacb9b3837742b26ee3a62e999140189"
 
 const File_deploy_internal_prometheus_rules_yaml = `apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -5435,6 +5456,17 @@ spec:
       for: 1m
       labels:
         severity: critical
+    - alert: NooBaaDatabaseInstanceFenced
+      annotations:
+        description: The NooBaa database instance on pod {{ $labels.pod }} has been fenced for more than 1 hour.
+        message: The NooBaa database instance on pod {{ $labels.pod }} is fenced and not serving. This can be caused by a stuck database backup or by manual fencing. Check the database backups and the fencedInstances annotation of the database cluster.
+        severity_level: warning
+        storage_type: NooBaa
+      expr: |
+        max by (pod) (cnpg_collector_fencing_on{pod=~".*-db-pg-cluster-[0-9]+"}) == 1
+      for: 1h
+      labels:
+        severity: warning
 `
 
 const Sha256_deploy_internal_pvc_agent_yaml = "c76fd98867e2e098204377899568a6e1e60062ece903c7bcbeb3444193ec13f8"

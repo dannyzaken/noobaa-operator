@@ -285,3 +285,14 @@ spec:
       for: 1m
       labels:
         severity: critical
+    - alert: NooBaaDatabaseInstanceFenced
+      annotations:
+        description: The NooBaa database instance on pod {{ $labels.pod }} has been fenced for more than 1 hour.
+        message: The NooBaa database instance on pod {{ $labels.pod }} is fenced and not serving. This can be caused by a stuck database backup or by manual fencing. Check the database backups and the fencedInstances annotation of the database cluster.
+        severity_level: warning
+        storage_type: NooBaa
+      expr: |
+        max by (pod) (cnpg_collector_fencing_on{pod=~".*-db-pg-cluster-[0-9]+"}) == 1
+      for: 1h
+      labels:
+        severity: warning
