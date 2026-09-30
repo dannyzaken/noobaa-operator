@@ -470,6 +470,9 @@ func (r *Reconciler) reconcileDBBackup() error {
 		return err
 	}
 
+	// keep only the newest failed backups
+	r.pruneFailedBackups()
+
 	// report the latest backups and failures
 	if err := r.reconcileBackupStatus(); err != nil {
 		r.cnpgLogError("got error reconciling backup status. error: %v", err)

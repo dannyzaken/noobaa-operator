@@ -3,6 +3,7 @@ package system
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,6 +41,9 @@ const (
 
 	// orphanCleanupRequeue is when to come back after deleting a backup, to delete its snapshot if it is not ready
 	orphanCleanupRequeue = 30 * time.Second
+
+	// keepFailedBackups is how many failed backups are kept for troubleshooting
+	keepFailedBackups = 3
 
 	// backupPhaseTimedOut is reported in the NooBaa status for a backup the operator stopped after the timeout
 	backupPhaseTimedOut = "timedOut"
@@ -198,6 +202,26 @@ func (r *Reconciler) cleanupOrphanBackupSnapshots() {
 	}
 }
 
+// pruneFailedBackups deletes failed backups beyond the newest keepFailedBackups.
+// Failed backups are not removed by the retention, which only deletes backups together with ready snapshots.
+// A snapshot left by a pruned backup is deleted by cleanupOrphanBackupSnapshots if it is not ready,
+// or stays under the retention if it is.
+func (r *Reconciler) pruneFailedBackups() {
+	backups, err := r.listScheduledBackups()
+	if err != nil {
+		r.cnpgLogError("got error listing scheduled backups. error: %v", err)
+		return
+	}
+	for _, backup := range failedBackupsToPrune(backups, keepFailedBackups) {
+		r.cnpgLog("deleting failed backup %s, keeping the newest %d failed backups", backup.Name, keepFailedBackups)
+		if err := r.Client.Delete(r.Ctx, cnpg.GetCnpgBackupObj(backup.Namespace, backup.Name)); err != nil && !errors.IsNotFound(err) {
+			r.cnpgLogError("got error deleting failed backup %s. error: %v", backup.Name, err)
+			continue
+		}
+		r.markBackupDeleted(backup.Name)
+	}
+}
+
 // reconcileBackupStatus reports the latest scheduled backups in the NooBaa status,
 // and emits an event once for every new failed backup.
 func (r *Reconciler) reconcileBackupStatus() error {
@@ -327,6 +351,30 @@ func findOrphanSnapshots(
 		orphans = append(orphans, snapshot)
 	}
 	return orphans
+}
+
+// failedBackupsToPrune returns the failed backups beyond the newest keep ones
+func failedBackupsToPrune(backups []cnpgv1.Backup, keep int) []cnpgv1.Backup {
+	failed := []cnpgv1.Backup{}
+	for _, backup := range backups {
+		if backup.Status.Phase == cnpgv1.BackupPhaseFailed {
+			failed = append(failed, backup)
+		}
+	}
+	if len(failed) <= keep {
+		return nil
+	}
+	// newest first
+	slices.SortFunc(failed, func(a, b cnpgv1.Backup) int {
+		if isNewerBackup(&a, &b) {
+			return -1
+		}
+		if isNewerBackup(&b, &a) {
+			return 1
+		}
+		return 0
+	})
+	return failed[keep:]
 }
 
 func isSnapshotReady(snapshot *storagesnapshotv1.VolumeSnapshot) bool {

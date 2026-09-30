@@ -234,6 +234,42 @@ func TestSummarizeBackups(t *testing.T) {
 	}
 }
 
+func TestFailedBackupsToPrune(t *testing.T) {
+	backups := []cnpgv1.Backup{
+		testBackup("f-1", cnpgv1.BackupPhaseFailed, 5*time.Hour, 5*time.Hour),
+		testBackup("c-1", cnpgv1.BackupPhaseCompleted, 4*time.Hour, 4*time.Hour),
+		testBackup("f-4", cnpgv1.BackupPhaseFailed, time.Hour, time.Hour),
+		testBackup("f-2", cnpgv1.BackupPhaseFailed, 3*time.Hour, 3*time.Hour),
+		testBackup("s-1", cnpgv1.BackupPhaseStarted, time.Minute, time.Minute),
+		testBackup("f-3", cnpgv1.BackupPhaseFailed, 2*time.Hour, 2*time.Hour),
+		testBackup("f-0", cnpgv1.BackupPhaseFailed, 6*time.Hour, 6*time.Hour),
+	}
+	tests := []struct {
+		name     string
+		backups  []cnpgv1.Backup
+		keep     int
+		expected []string
+	}{
+		{"no backups", nil, 3, []string{}},
+		{"fewer failed than keep", backups[:3], 3, []string{}},
+		{"prune the oldest failed", backups, 3, []string{"f-1", "f-0"}},
+		{"keep none", backups, 0, []string{"f-4", "f-3", "f-2", "f-1", "f-0"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := backupNames(failedBackupsToPrune(tt.backups, tt.keep))
+			if len(got) != len(tt.expected) {
+				t.Fatalf("failedBackupsToPrune() = %v, want %v", got, tt.expected)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Fatalf("failedBackupsToPrune() = %v, want %v", got, tt.expected)
+				}
+			}
+		})
+	}
+}
+
 func TestMergeBackupStatus(t *testing.T) {
 	failedBackup := func(name string, createdAgo time.Duration, failedAgo time.Duration) cnpgv1.Backup {
 		b := testBackup(name, cnpgv1.BackupPhaseFailed, createdAgo, createdAgo)
