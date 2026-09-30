@@ -653,6 +653,10 @@ func (in *DBBackupStatus) DeepCopyInto(out *DBBackupStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.LastFailedBackupTime != nil {
+		in, out := &in.LastFailedBackupTime, &out.LastFailedBackupTime
+		*out = (*in).DeepCopy()
+	}
 	return
 }
 

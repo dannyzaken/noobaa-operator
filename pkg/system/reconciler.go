@@ -142,6 +142,11 @@ type Reconciler struct {
 	CNPGImageCatalog *cnpgv1.ImageCatalog
 	CNPGCluster      *cnpgv1.Cluster
 
+	// backupRequeueAfter is set while a DB backup is running, to recheck it when it reaches its timeout
+	backupRequeueAfter time.Duration
+	// deletedBackups are the DB backups deleted in this reconcile, which the cached client may still return
+	deletedBackups map[string]bool
+
 	// Network Policies (Phase 1 - operands only)
 	NetworkPolicyCore     *networkingv1.NetworkPolicy
 	NetworkPolicyDb       *networkingv1.NetworkPolicy
@@ -568,6 +573,11 @@ func (r *Reconciler) Reconcile() (reconcile.Result, error) {
 	if err != nil {
 		res.RequeueAfter = 3 * time.Second
 		log.Warnf("⏳ Temporary Error: %s", err)
+	}
+
+	// a running DB backup must be rechecked at its timeout even if nothing else triggers a reconcile
+	if r.backupRequeueAfter > 0 && (res.RequeueAfter == 0 || r.backupRequeueAfter < res.RequeueAfter) {
+		res.RequeueAfter = r.backupRequeueAfter
 	}
 	return res, nil
 }

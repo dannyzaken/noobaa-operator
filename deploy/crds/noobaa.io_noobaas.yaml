@@ -2142,9 +2142,30 @@ spec:
                         items:
                           type: string
                         type: array
+                      lastBackupError:
+                        description: LastBackupError error of the most recent failed
+                          backup
+                        type: string
+                      lastBackupName:
+                        description: LastBackupName name of the most recently created
+                          backup
+                        type: string
+                      lastBackupPhase:
+                        description: LastBackupPhase phase of the most recently created
+                          backup
+                        type: string
                       lastBackupTime:
                         description: LastBackupTime timestamp of the last successful
                           backup
+                        format: date-time
+                        type: string
+                      lastFailedBackupName:
+                        description: LastFailedBackupName name of the most recent
+                          failed backup
+                        type: string
+                      lastFailedBackupTime:
+                        description: LastFailedBackupTime timestamp of the most recent
+                          failed backup
                         format: date-time
                         type: string
                       nextBackupTime:
